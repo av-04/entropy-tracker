@@ -49,3 +49,10 @@ htmlcov/
 .ruff_cache/
 
 ENTROPY_PLAN.md
+
+# Entropy Reports and Test Artifacts
+*.html
+*.tmp
+
+# Test Repositories
+repos/

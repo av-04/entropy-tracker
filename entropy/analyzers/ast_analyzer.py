@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -87,27 +88,39 @@ class ASTAnalyzer:
         """Map dotted module names → relative file paths."""
         self._module_paths.clear()
 
-        for py_file in self.repo_path.rglob("*.py"):
-            try:
-                rel = py_file.relative_to(self.repo_path)
-            except ValueError:
-                continue
+        roots = [self.repo_path]
+        src_dir = self.repo_path / "src"
+        if src_dir.is_dir():
+            roots.append(src_dir)
 
-            # Skip hidden dirs, __pycache__, venv, node_modules
-            parts = rel.parts
-            if any(p.startswith(".") or p in ("__pycache__", "venv", ".venv", "node_modules") for p in parts):
-                continue
+        for root in roots:
+            for py_file in root.rglob("*.py"):
+                try:
+                    rel_to_root = py_file.relative_to(root)
+                    rel_to_repo = py_file.relative_to(self.repo_path)
+                except ValueError:
+                    continue
 
-            rel_str = str(rel).replace("\\", "/")
+                # Skip hidden dirs, __pycache__, venv, node_modules
+                parts = rel_to_repo.parts
+                if any(p.startswith(".") or p in ("__pycache__", "venv", ".venv", "node_modules") for p in parts):
+                    continue
 
-            # Build dotted name: e.g. "entropy/analyzers/git_analyzer.py" → "entropy.analyzers.git_analyzer"
-            if rel.name == "__init__.py":
-                dotted = ".".join(parts[:-1])
-            else:
-                dotted = ".".join(parts[:-1] + (rel.stem,))
+                rel_str = str(rel_to_repo).replace("\\", "/")
 
-            if dotted:
-                self._module_paths[dotted] = rel_str
+                # If checking repo root and there's a src dir, skip files inside src
+                if root == self.repo_path and src_dir.is_dir() and "src" in rel_to_repo.parts:
+                    continue
+
+                # Build dotted name relative to root
+                root_parts = rel_to_root.parts
+                if rel_to_root.name == "__init__.py":
+                    dotted = ".".join(root_parts[:-1])
+                else:
+                    dotted = ".".join(root_parts[:-1] + (rel_to_root.stem,))
+
+                if dotted:
+                    self._module_paths[dotted] = rel_str
 
     # ---- import extraction --------------------------------------------------
 
@@ -116,7 +129,9 @@ class ASTAnalyzer:
         """Extract all import statements as dotted names."""
         try:
             source = filepath.read_text(errors="replace")
-            tree = ast.parse(source, filename=str(filepath))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                tree = ast.parse(source, filename=str(filepath))
         except (SyntaxError, UnicodeDecodeError):
             return []
 

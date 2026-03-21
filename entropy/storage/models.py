@@ -55,7 +55,7 @@ class ModuleEntropy(Base):
     __tablename__ = "module_entropy"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    time = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    time = Column(DateTime(timezone=True), primary_key=True, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     repo_id = Column(UUID(as_uuid=True), ForeignKey("repos.id"), nullable=False, index=True)
     module_path = Column(Text, nullable=False, index=True)
     entropy_score = Column(Float, nullable=False)

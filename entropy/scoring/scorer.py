@@ -113,7 +113,50 @@ class EntropyScorer:
 
         results: dict[str, ModuleScore] = {}
         for path in sorted(scorable):
-            results[path] = self._score_module(path, git_data, dep_data, import_graph, bus_factor_fn)
+            results[path] = self._score_module(path, git_data, dep_data, import_graph)
+
+        if bus_factor_fn:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            BUS_FACTOR_MIN_SCORE = 50
+            BUS_FACTOR_MIN_COMMITS = 5
+            BUS_FACTOR_MAX_FILES = 400
+
+            candidates = []
+            for path, ms in results.items():
+                gd = git_data.get(path)
+                commits = gd.total_commits if gd else 0
+                if ms.entropy_score >= BUS_FACTOR_MIN_SCORE and commits >= BUS_FACTOR_MIN_COMMITS:
+                    candidates.append(path)
+
+            candidates = candidates[:BUS_FACTOR_MAX_FILES]
+            
+            def approximate_bus_factor(authors: set[str]) -> int:
+                n = len(authors)
+                if n <= 1: return 1
+                if n <= 3: return 2
+                return min(n // 2, 5)
+
+            bus_factors = {}
+            if candidates:
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    future_to_path = {
+                        executor.submit(bus_factor_fn, path): path
+                        for path in candidates
+                    }
+                    for future in as_completed(future_to_path):
+                        path = future_to_path[future]
+                        try:
+                            bus_factors[path] = future.result()
+                        except Exception:
+                            bus_factors[path] = 1
+
+            for path, ms in results.items():
+                if path in bus_factors:
+                    ms.bus_factor = bus_factors[path]
+                else:
+                    gd = git_data.get(path)
+                    authors = gd.authors_active if gd and gd.authors_active else gd.authors_all_time if gd else set()
+                    ms.bus_factor = approximate_bus_factor(authors)
 
         return results
 
@@ -123,7 +166,6 @@ class EntropyScorer:
         git_data: dict[str, FileGitData],
         dep_data: dict[str, FileDepData],
         import_graph: ImportGraphData,
-        bus_factor_fn,
     ) -> ModuleScore:
         ms = ModuleScore(module_path=path)
         w = self.config.weights
@@ -131,6 +173,8 @@ class EntropyScorer:
         # ---- Knowledge Decay ------------------------------------------------
         gd = git_data.get(path)
         if gd:
+            # Note: `authors_all_time` here actually means "authors in the 36-month window".
+            # Knowledge decay is measured consistently within this 3-year window rather than true all-time.
             total = len(gd.authors_all_time)
             active = len(gd.authors_active)
             if total > 0:
@@ -164,9 +208,5 @@ class EntropyScorer:
 
         # ---- Blast Radius ---------------------------------------------------
         ms.blast_radius = import_graph.blast_radius.get(path, 0)
-
-        # ---- Bus Factor -----------------------------------------------------
-        if bus_factor_fn:
-            ms.bus_factor = bus_factor_fn(path)
 
         return ms

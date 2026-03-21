@@ -28,21 +28,47 @@ logger = logging.getLogger(__name__)
 # Database URL
 # ---------------------------------------------------------------------------
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres:entropy@localhost:5432/entropy",
-)
+# Priority: DATABASE_URL env var → docker default → SQLite local
+_DEFAULT_PG_URL = "postgresql://postgres:entropy@localhost:5432/entropy"
+DATABASE_URL = os.environ.get("DATABASE_URL", _DEFAULT_PG_URL)
 
-# For SQLite fallback (testing / no postgres)
+# SQLite fallback for local use without Docker
 SQLITE_URL = "sqlite:///entropy.db"
+
+_db_url_resolved: str | None = None  # cached after first probe
 
 
 def get_database_url() -> str:
-    """Get the database URL, falling back to SQLite if PostgreSQL isn't available."""
-    db_url = DATABASE_URL
-    if not db_url.startswith("postgresql"):
-        return SQLITE_URL
-    return db_url
+    """
+    Return the best available DB URL.
+    Probes PostgreSQL first; silently falls back to SQLite on any connection error.
+    Result is cached so the probe only happens once per process.
+    """
+    global _db_url_resolved
+    if _db_url_resolved is not None:
+        return _db_url_resolved
+
+    target = DATABASE_URL
+    if not target.startswith("postgresql"):
+        _db_url_resolved = SQLITE_URL
+        return _db_url_resolved
+
+    # Probe PostgreSQL with a quick connection attempt
+    try:
+        from sqlalchemy import create_engine, text as sql_text
+        probe = create_engine(target, pool_pre_ping=True, connect_args={"connect_timeout": 3})
+        with probe.connect() as conn:
+            conn.execute(sql_text("SELECT 1"))
+        probe.dispose()
+        _db_url_resolved = target
+        logger.info("Database: connected to PostgreSQL at %s", target.split("@")[-1])
+    except Exception as e:
+        logger.warning(
+            "PostgreSQL unavailable (%s). Falling back to SQLite (entropy.db).", str(e)[:80]
+        )
+        _db_url_resolved = SQLITE_URL
+
+    return _db_url_resolved
 
 
 # ---------------------------------------------------------------------------
@@ -118,8 +144,8 @@ def init_db() -> None:
                 )
                 conn.commit()
                 logger.info("TimescaleDB hypertable configured for module_entropy")
-        except Exception:
-            logger.warning("TimescaleDB not available — using regular PostgreSQL table")
+        except Exception as e:
+            logger.warning("TimescaleDB not available — using regular PostgreSQL table: %s", str(e))
 
 
 def reset_engine() -> None:

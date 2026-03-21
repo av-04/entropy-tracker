@@ -1,18 +1,16 @@
 """
-Entropy CLI — the primary interface for engineers.
-
-Built with Typer + Rich for professional terminal output.
+Entropy CLI — full-featured terminal interface for engineers.
 
 Commands:
     entropy init <path>               Register and first-scan a repo
     entropy scan <path>               Run scan now, update DB
-    entropy report                    All modules sorted by entropy
+    entropy report                    All modules sorted by entropy score
     entropy report --top 10           Worst 10 modules
-    entropy inspect <path>            Full breakdown + forecast
-    entropy trend --last 90days       Repo entropy trajectory (ASCII)
+    entropy inspect <file>            Full breakdown + forecast
+    entropy trend --last 90days       Repo entropy trajectory
     entropy diff --since 7days        Which modules got worse
-    entropy forecast <path>           Projected entropy at 30/60/90 days
-    entropy report --format html      Export as HTML
+    entropy forecast <file>           Projected entropy at 30/60/90 days
+    entropy report --format html      Export as HTML (utf-8)
     entropy server                    Start the FastAPI server
 """
 
@@ -22,31 +20,32 @@ import json
 import os
 import sys
 
-# Fix Windows terminal encoding for Unicode/emoji support
+# Fix Windows terminal encoding — must happen before any Rich output
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
     except Exception:
         os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-from datetime import datetime, timedelta, timezone
+
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import typer
 from rich import box
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
-from rich.tree import Tree
 
 from entropy import __version__
 
 app = typer.Typer(
     name="entropy",
-    help="🔬 Entropy — A Code Aging & Decay Tracker",
+    help="Entropy - A Code Aging & Decay Tracker",
     add_completion=True,
     no_args_is_help=True,
 )
@@ -64,68 +63,145 @@ def _severity_color(severity: str) -> str:
         "HIGH": "bold yellow",
         "MEDIUM": "bold cyan",
         "HEALTHY": "bold green",
-        "WATCH": "bold magenta",
     }.get(severity, "white")
 
 
 def _severity_icon(severity: str) -> str:
-    return {
-        "CRITICAL": "⚠",
-        "HIGH": "▲",
-        "MEDIUM": "●",
-        "HEALTHY": "✓",
-    }.get(severity, "·")
+    return {"CRITICAL": "!", "HIGH": "^", "MEDIUM": "~", "HEALTHY": "+"}.get(severity, ".")
 
 
 def _trend_arrow(trend: float) -> str:
     if trend > 3:
-        return "↑↑"
+        return "up++"
     elif trend > 0:
-        return "↑"
+        return "up"
     elif trend < -1:
-        return "↓"
+        return "dn"
     else:
-        return "→"
+        return "--"
 
 
 def _run_full_scan(repo_path: str):
-    """Run the complete analysis pipeline and return scores."""
+    """Run the complete 4-step analysis pipeline.
+    
+    Each step prints a permanent completion line to the terminal — so you
+    can see all 4 steps after the scan finishes, not just a transient spinner.
+    """
     from entropy.analyzers.ast_analyzer import ASTAnalyzer
     from entropy.analyzers.dep_analyzer import DepAnalyzer
     from entropy.analyzers.git_analyzer import GitAnalyzer
     from entropy.scoring.alerts import AlertEngine
     from entropy.scoring.scorer import EntropyScorer
 
+    git: GitAnalyzer | None = None
+    git_data = {}
+    dep_data = {}
+    import_graph = None
+    scores = {}
+    alerts = []
+
+    # ── Step 1: Git history ──────────────────────────────────────────────────
+    git = GitAnalyzer(repo_path)
+    total_commits = git._total_commits
+    total_str = f"/{total_commits}" if total_commits > 0 else ""
+
     with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
+        SpinnerColumn(style="bold cyan"),
+        TextColumn("{task.description}"),
         console=console,
+        transient=True,
     ) as progress:
-        task = progress.add_task("Analyzing git history…", total=None)
-        git = GitAnalyzer(repo_path)
-        git_data = git.analyze()
+        task_id = progress.add_task(
+            f"  [dim]Step 1/4[/dim] Analyzing git history[dim]{total_str and f' (~{total_commits} commits)'}[/dim]…",
+            total=None,
+        )
 
-        progress.update(task, description="Analyzing dependencies…")
-        dep = DepAnalyzer(repo_path)
-        dep_data = dep.analyze()
+        def git_progress(commits, total, files):
+            total_label = f"/{total}" if total > 0 else ""
+            progress.update(
+                task_id,
+                description=(
+                    f"  [dim]Step 1/4[/dim] Git history — "
+                    f"[bold]{commits}{total_label}[/bold] commits · {files} files"
+                ),
+            )
 
-        progress.update(task, description="Building import graph…")
-        ast_a = ASTAnalyzer(repo_path)
-        import_graph = ast_a.analyze()
+        git_data = git.analyze(progress_callback=git_progress)
 
-        progress.update(task, description="Computing entropy scores…")
-        scorer = EntropyScorer()
-        scores = scorer.score_all(git_data, dep_data, import_graph, git.compute_bus_factor)
+    # Print permanent summary line for step 1
+    total_label = f"/{total_commits}" if total_commits > 0 else ""
+    console.print(
+        f"  [bold green]✔[/bold green] [dim]Step 1/4[/dim]  Git history  "
+        f"[bold]{len(git_data)} files[/bold] tracked across [bold]{git._total_commits or '?'}[/bold] commits"
+    )
+    if getattr(git, "_using_full_history", False):
+        console.print(
+            "  [yellow]Note:[/yellow] [dim]Repo has no commits in past 36 months — "
+            "using full git history for decay signals[/dim]"
+        )
 
-        progress.update(task, description="Evaluating alerts…")
-        alert_engine = AlertEngine()
-        alerts = alert_engine.evaluate(scores)
+    # ── Step 2: Dependency analysis ──────────────────────────────────────────
+    pkg_count_holder = [0]
+    with Progress(
+        SpinnerColumn(style="bold cyan"),
+        TextColumn("{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task("  [dim]Step 2/4[/dim] Analyzing dependencies…", total=None)
+
+        def dep_progress(msg: str):
+            # extract package count from message if possible
+            import re as _re
+            m = _re.search(r"(\d+)", msg)
+            if m:
+                pkg_count_holder[0] = int(m.group(1))
+            progress.update(task_id, description=f"  [dim]Step 2/4[/dim] Dependencies — [dim]{msg}[/dim]")
+
+        dep_data = DepAnalyzer(repo_path).analyze(progress_callback=dep_progress)
+
+    console.print(
+        f"  [bold green]✔[/bold green] [dim]Step 2/4[/dim]  Dependencies  "
+        f"[bold]{len(dep_data)} files[/bold] · [bold]{pkg_count_holder[0]}[/bold] unique packages queried"
+    )
+
+    # ── Step 3: AST import graph ─────────────────────────────────────────────
+    with Progress(
+        SpinnerColumn(style="bold cyan"),
+        TextColumn("{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task("  [dim]Step 3/4[/dim] Building import graph…", total=None)
+        import_graph = ASTAnalyzer(repo_path).analyze()
+
+    console.print(
+        f"  [bold green]✔[/bold green] [dim]Step 3/4[/dim]  Import graph  "
+        f"[bold]{len(import_graph.all_modules)} modules[/bold] mapped"
+    )
+
+    # ── Step 4: Scoring ───────────────────────────────────────────────────────
+    with Progress(
+        SpinnerColumn(style="bold cyan"),
+        TextColumn("{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task("  [dim]Step 4/4[/dim] Computing entropy scores…", total=None)
+        scores = EntropyScorer().score_all(git_data, dep_data, import_graph, git.compute_bus_factor)
+        alerts = AlertEngine().evaluate(scores)
+
+    console.print(
+        f"  [bold green]✔[/bold green] [dim]Step 4/4[/dim]  Scoring  "
+        f"[bold]{len(scores)} modules[/bold] scored · [bold]{len(alerts)} alerts[/bold] fired"
+    )
+    console.print()
 
     return scores, alerts, git_data
 
 
 def _persist_scores(repo_name: str, repo_path: str, scores, alerts):
-    """Save scores and alerts to database."""
+    """Save scores and alerts to database. Falls back to SQLite automatically."""
     from entropy.storage.db import get_session, init_db, save_alerts, save_module_scores, save_repo
 
     try:
@@ -135,10 +211,14 @@ def _persist_scores(repo_name: str, repo_path: str, scores, alerts):
             save_module_scores(session, repo.id, scores)
             save_alerts(session, repo.id, alerts)
             repo.last_scan_at = datetime.now(timezone.utc)
-            return repo.id
+        from entropy.storage.db import get_database_url
+        db_url = get_database_url()
+        db_label = "PostgreSQL" if "postgresql" in db_url else "SQLite (entropy.db)"
+        console.print(f"  [dim]Results saved to {db_label}[/dim]")
+        return True
     except Exception as e:
-        console.print(f"[dim]Note: Could not persist to database ({e}). Results shown but not stored.[/dim]")
-        return None
+        console.print(f"  [dim]Note: Could not persist results ({e})[/dim]")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -149,24 +229,22 @@ def _persist_scores(repo_name: str, repo_path: str, scores, alerts):
 @app.command()
 def init(
     path: str = typer.Argument(..., help="Path to git repository"),
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Repository name (defaults to directory name)"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Repository name"),
 ):
     """Register a repository and run the first scan."""
     repo_path = Path(path).resolve()
     if not repo_path.is_dir():
         console.print(f"[red]Error: Path does not exist: {repo_path}[/red]")
         raise typer.Exit(1)
-
     if not (repo_path / ".git").is_dir():
         console.print(f"[red]Error: Not a git repository: {repo_path}[/red]")
         raise typer.Exit(1)
 
     repo_name = name or repo_path.name
-    console.print(f"\n[bold]🔬 Initializing Entropy for [cyan]{repo_name}[/cyan][/bold]\n")
+    console.print(f"\n[bold]Entropy Init   {repo_name}[/bold]\n")
 
     scores, alerts, _ = _run_full_scan(str(repo_path))
     _persist_scores(repo_name, str(repo_path), scores, alerts)
-
     _print_summary(repo_name, scores, alerts)
 
 
@@ -174,71 +252,98 @@ def init(
 def scan(
     path: str = typer.Argument(".", help="Path to git repository"),
 ):
-    """Run an entropy scan on a repository."""
+    """Run an entropy scan on a repository and update results."""
     repo_path = Path(path).resolve()
-    if not repo_path.is_dir():
-        console.print(f"[red]Error: Path does not exist: {repo_path}[/red]")
-        raise typer.Exit(1)
-
     repo_name = repo_path.name
-    console.print(f"\n[bold]🔬 Scanning [cyan]{repo_name}[/cyan][/bold]\n")
+    console.print(f"\n[bold]Entropy Scan   {repo_name}[/bold]\n")
 
     scores, alerts, _ = _run_full_scan(str(repo_path))
     _persist_scores(repo_name, str(repo_path), scores, alerts)
-
     _print_summary(repo_name, scores, alerts)
 
 
 @app.command()
 def report(
     path: str = typer.Argument(".", help="Path to git repository"),
-    top: int = typer.Option(0, "--top", "-t", help="Show only top N worst modules"),
-    format: str = typer.Option("table", "--format", "-f", help="Output format: table, json, html"),
+    top: int = typer.Option(50, "--top", "-t", help="Show only top N worst modules (0 = all)"),
+    format: str = typer.Option("table", "--format", "-f", help="table, json, or html"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show full signal breakdown"),
+    exclude: list[str] = typer.Option([], "--exclude", "-x", help="Exclude path prefixes (e.g. tests/)"),
 ):
     """Show all modules sorted by entropy score."""
     repo_path = Path(path).resolve()
     scores, alerts, _ = _run_full_scan(str(repo_path))
 
+    if top == 0 and len(scores) > 100:
+        console.print(f"\n[yellow]Generating full report for {len(scores)} modules.[/yellow]")
+        console.print("[yellow]This may be slow. Use --top 50 for a focused view.[/yellow]\n")
+
     sorted_scores = sorted(scores.values(), key=lambda s: s.entropy_score, reverse=True)
+
+    # Apply --exclude filters
+    # Each exclude pattern is matched against:
+    #   1. The full normalized path (prefix match from root)
+    #   2. Any individual path segment (catches nested test dirs like boto/fps/test/)
+    if exclude:
+        def _is_excluded(module_path: str, excludes: list[str]) -> bool:
+            norm = module_path.replace("\\", "/")
+            segments = norm.split("/")
+            for ex in excludes:
+                ex = ex.replace("\\", "/").strip("/")
+                # Root-prefix match: tests/ matches tests/unit/foo.py
+                if norm.startswith(ex + "/") or norm == ex:
+                    return True
+                # Segment match: tests/ matches boto/fps/tests/foo.py
+                if ex in segments:
+                    return True
+                # Partial segment match: test matches boto/test_connection.py
+                if any(seg.startswith(ex) for seg in segments):
+                    return True
+            return False
+
+        sorted_scores = [s for s in sorted_scores if not _is_excluded(s.module_path, list(exclude))]
+        console.print(f"  [dim]Excluded prefixes: {', '.join(exclude)}[/dim]")
+
+
     if top > 0:
         sorted_scores = sorted_scores[:top]
 
     if format == "json":
-        data = [s.to_dict() for s in sorted_scores]
-        console.print_json(json.dumps(data, indent=2))
+        console.print_json(json.dumps([s.to_dict() for s in sorted_scores], indent=2))
         return
 
     if format == "html":
         _export_html(repo_path.name, sorted_scores)
         return
 
-    _print_report_table(repo_path.name, sorted_scores)
+    _print_report_table(repo_path.name, sorted_scores, verbose)
 
 
 @app.command()
 def inspect(
-    file_path: str = typer.Argument(..., help="Path to module file (relative to repo root)"),
+    file_path: str = typer.Argument(..., help="Module file path (relative to repo root)"),
     repo: str = typer.Option(".", "--repo", "-r", help="Path to repository"),
 ):
-    """Full breakdown: signals, forecast, blast radius for a single module."""
+    """Full signal breakdown, forecast, blast radius for a single module."""
     repo_path = Path(repo).resolve()
-    scores, _, git_data = _run_full_scan(str(repo_path))
+    scores, _, _ = _run_full_scan(str(repo_path))
 
-    # Find the matching module
     target = None
+    # Normalize the query path for matching
+    query_normalized = file_path.replace("\\", "/")
     for path, score in scores.items():
-        if file_path in path or path.endswith(file_path):
+        norm_path = path.replace("\\", "/")
+        if query_normalized in norm_path or norm_path.endswith(query_normalized):
             target = score
             break
 
     if target is None:
         console.print(f"[red]Module not found: {file_path}[/red]")
+        console.print("[dim]Tip: Use the exact relative path shown in 'entropy report'[/dim]")
         raise typer.Exit(1)
 
     from entropy.scoring.forecaster import build_forecast
-
     fc = build_forecast(target.entropy_score, trend_override=target.trend_per_month)
-
     _print_inspect(target, fc)
 
 
@@ -247,7 +352,7 @@ def trend(
     path: str = typer.Argument(".", help="Path to git repository"),
     last: str = typer.Option("90days", "--last", "-l", help="Time period: 30days, 90days, 1year"),
 ):
-    """Show repo entropy trajectory (ASCII chart)."""
+    """Show repo entropy trend (severity distribution ASCII chart)."""
     repo_path = Path(path).resolve()
     scores, _, _ = _run_full_scan(str(repo_path))
 
@@ -260,80 +365,163 @@ def trend(
     high = sum(1 for s in scores.values() if s.severity() == "HIGH")
     medium = sum(1 for s in scores.values() if s.severity() == "MEDIUM")
     healthy = sum(1 for s in scores.values() if s.severity() == "HEALTHY")
-
-    console.print(f"\n[bold]📊 Entropy Trend — {repo_path.name}[/bold]")
-    console.print(f"   Period: {last}\n")
-
-    # ASCII bar chart of severity distribution
     total = len(scores)
-    bars = {
-        "Critical": (critical, "red"),
-        "High": (high, "yellow"),
-        "Medium": (medium, "cyan"),
-        "Healthy": (healthy, "green"),
-    }
 
-    for label, (count, color) in bars.items():
+    console.print(f"\n[bold]Entropy Trend -- {repo_path.name}[/bold]")
+    console.print(f"   Window: {last}\n")
+
+    for label, count, color in [
+        ("Critical", critical, "red"),
+        ("High", high, "yellow"),
+        ("Medium", medium, "cyan"),
+        ("Healthy", healthy, "green"),
+    ]:
         bar_len = int(count / total * 40) if total else 0
-        bar = "█" * bar_len + "░" * (40 - bar_len)
-        console.print(f"  [{color}]{label:>10}[/{color}]  [{color}]{bar}[/{color}]  {count}")
+        bar = "#" * bar_len + "." * (40 - bar_len)
+        pct = f"{count / total * 100:.0f}%" if total else "0%"
+        console.print(f"  [{color}]{label:>10}[/{color}]  [{color}]{bar}[/{color}]  {count} ({pct})")
 
-    console.print(f"\n  Average Entropy: [bold]{avg:.1f}[/bold]  |  Modules: {total}\n")
+    console.print(f"\n  Average Entropy Score: [bold]{avg:.1f}[/bold] / 100")
+    console.print(f"  Total Modules:         {total}\n")
 
 
 @app.command()
 def diff(
     path: str = typer.Argument(".", help="Path to git repository"),
-    since: str = typer.Option("7days", "--since", "-s", help="Time period: 7days, 30days"),
+    base: str = typer.Option("main", "--base", "-b", help="Base branch to compare against"),
 ):
-    """Show which modules got worse recently."""
+    """Diff entropy scores for files changed between current branch and base branch."""
+    import subprocess
+    import tempfile
+    import os
+
     repo_path = Path(path).resolve()
-    scores, _, _ = _run_full_scan(str(repo_path))
 
-    worsened = [
-        s for s in scores.values()
-        if s.trend_per_month > 0
-    ]
-    worsened.sort(key=lambda s: s.trend_per_month, reverse=True)
+    # 1. Get changed files (only Python files)
+    try:
+        cmd = ["git", "diff", "--name-only", f"{base}...HEAD"]
+        output = subprocess.check_output(cmd, cwd=repo_path, text=True, stderr=subprocess.STDOUT)
+        changed_files = [f for f in output.splitlines() if f.endswith(".py")]
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Error comparing branches:[/red] {e.output}")
+        raise typer.Exit(1)
 
-    if not worsened:
-        console.print("[green]✓ No modules are getting worse![/green]")
+    if not changed_files:
+        console.print(f"[green]No Python files changed against {base}.[/green]")
         return
 
-    console.print(f"\n[bold]📉 Modules Getting Worse — {repo_path.name}[/bold]")
-    console.print(f"   Since: {since}\n")
+    console.print(f"\n[bold]Entropy Diff  [{base} → HEAD][/bold]\n")
+
+    # 2. Score current branch (HEAD)
+    console.print("[dim]Analyzing current branch (HEAD)...[/dim]")
+    head_scores, _, _ = _run_full_scan(str(repo_path))
+
+    # 3. Score base branch via temporary worktree
+    console.print(f"\n[dim]Analyzing base branch ({base})...[/dim]")
+    base_scores = {}
+    with tempfile.TemporaryDirectory() as td:
+        # worktree add requires the dir to not exist
+        os.rmdir(td)
+        try:
+            subprocess.run(
+                ["git", "worktree", "add", td, base],
+                cwd=repo_path,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            base_scores, _, _ = _run_full_scan(td)
+        except subprocess.CalledProcessError:
+            console.print(f"[red]Failed to create worktree for branch '{base}'. Does it exist?[/red]")
+            raise typer.Exit(1)
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", td],
+                cwd=repo_path,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+    # 4. Compute deltas
+    results = []
+    total_delta = 0.0
+
+    # Normalize changed files (git diff returns forward slashes)
+    changed_normalized = {f.replace("\\", "/") for f in changed_files}
+
+    for f_path in changed_normalized:
+        head_score = 0.0
+        base_score = 0.0
+        
+        # Find in HEAD
+        for hp, score_obj in head_scores.items():
+            if hp.replace("\\", "/") == f_path:
+                head_score = score_obj.entropy_score
+                break
+                
+        # Find in BASE
+        for bp, score_obj in base_scores.items():
+            if bp.replace("\\", "/") == f_path:
+                base_score = score_obj.entropy_score
+                break
+                
+        delta = head_score - base_score
+        total_delta += delta
+        results.append((f_path, base_score, head_score, delta))
+
+    # Sort by worst actual head_score
+    results.sort(key=lambda x: x[2], reverse=True)
+
+    console.print(f"\n[bold]Entropy delta for current branch vs {base}:[/bold]\n")
 
     table = Table(box=box.ROUNDED)
-    table.add_column("Module", style="white", max_width=50)
-    table.add_column("Score", justify="right")
-    table.add_column("Trend", justify="right")
-    table.add_column("Severity", justify="center")
+    table.add_column("Changed File", max_width=55)
+    table.add_column("Delta", justify="right", width=8)
+    table.add_column("Scores", justify="center", width=12)
+    table.add_column("Severity", justify="center", width=10)
 
-    for s in worsened[:20]:
-        severity = s.severity()
+    for f_path, b_score, h_score, delta in results:
+        # Determine severity of head score manually if needed, or via dummy
+        from entropy.scoring.scorer import ModuleScore
+        severity = ModuleScore(module_path="", entropy_score=h_score).severity()
         color = _severity_color(severity)
+        
+        delta_str = f"[red]+{delta:.1f}[/red]" if delta > 0 else (f"[green]{delta:+.1f}[/green]" if delta < 0 else f"[dim]{delta:+.1f}[/dim]")
+        score_str = f"{b_score:.0f} → [{color}]{h_score:.0f}[/{color}]"
+        
         table.add_row(
-            s.module_path,
-            f"[{color}]{s.entropy_score:.0f}[/{color}]",
-            f"[red]+{s.trend_per_month:.1f}/mo[/red]",
-            f"[{color}]{severity}[/{color}]",
+            f_path,
+            delta_str,
+            score_str,
+            f"[{color}]{severity}[/{color}]"
         )
 
     console.print(table)
+    
+    net_color = "red" if total_delta > 0 else "green"
+    console.print(f"\n  Net branch entropy delta: [{net_color}]{total_delta:+.1f}[/{net_color}] points across {len(results)} changed files")
+    
+    if results:
+        worst_file = results[0]
+        if worst_file[2] >= 50:
+            console.print(f"  Highest risk: [bold]{worst_file[0]}[/bold] — review carefully\n")
+
 
 
 @app.command()
 def forecast(
-    file_path: str = typer.Argument(..., help="Path to module file"),
+    file_path: str = typer.Argument(..., help="Module file path"),
     repo: str = typer.Option(".", "--repo", "-r", help="Path to repository"),
 ):
-    """Project entropy score at 30/60/90 days."""
+    """Project entropy score at 30/60/90 days for a module."""
     repo_path = Path(repo).resolve()
     scores, _, _ = _run_full_scan(str(repo_path))
 
+    query_normalized = file_path.replace("\\", "/")
     target = None
     for path, score in scores.items():
-        if file_path in path or path.endswith(file_path):
+        norm_path = path.replace("\\", "/")
+        if query_normalized in norm_path or norm_path.endswith(query_normalized):
             target = score
             break
 
@@ -342,25 +530,32 @@ def forecast(
         raise typer.Exit(1)
 
     from entropy.scoring.forecaster import build_forecast
-
     fc = build_forecast(target.entropy_score, trend_override=target.trend_per_month)
 
-    console.print(f"\n[bold]🔮 Forecast — {target.module_path}[/bold]\n")
-    console.print(f"  Current Score: [bold]{fc.current_score:.0f}[/bold]")
-    console.print(f"  Trend:         {fc.trend_per_month:+.2f} per month\n")
+    console.print(f"\n[bold]Forecast -- {target.module_path}[/bold]\n")
+    console.print(f"  Current Score : [bold]{fc.current_score:.0f}[/bold] / 100")
+    console.print(f"  Trend         : {fc.trend_per_month:+.2f} / month\n")
 
-    table = Table(box=box.SIMPLE_HEAVY)
+    table = Table(box=box.SIMPLE_HEAVY, show_header=True)
     table.add_column("Period", style="bold")
     table.add_column("Projected Score", justify="right")
+    table.add_column("Severity", justify="center")
 
     for label, score in [("30 days", fc.score_30d), ("60 days", fc.score_60d), ("90 days", fc.score_90d)]:
-        color = "red" if score >= 85 else "yellow" if score >= 70 else "cyan" if score >= 50 else "green"
-        table.add_row(label, f"[{color}]{score:.0f}[/{color}]")
+        from entropy.scoring.scorer import ModuleScore
+        dummy = ModuleScore(module_path="", entropy_score=score)
+        sev = dummy.severity()
+        color = _severity_color(sev)
+        table.add_row(label, f"[{color}]{score:.0f}[/{color}]", f"[{color}]{sev}[/{color}]")
 
     console.print(table)
 
     if fc.days_to_unmaintainable:
-        console.print(f"\n  [bold red]⚠ Estimated unmaintainable in ~{fc.days_to_unmaintainable} days[/bold red]")
+        console.print(
+            f"\n  [bold red]WARNING: Estimated unmaintainable "
+            f"in ~{fc.days_to_unmaintainable} days "
+            f"({fc.days_to_unmaintainable // 30} months)[/bold red]"
+        )
     console.print()
 
 
@@ -370,17 +565,17 @@ def server(
     port: int = typer.Option(8000, "--port", "-p"),
     reload: bool = typer.Option(False, "--reload"),
 ):
-    """Start the Entropy API server."""
+    """Start the Entropy API server and dashboard."""
     import uvicorn
-
-    console.print(f"\n[bold]🚀 Starting Entropy API at http://{host}:{port}[/bold]")
-    console.print(f"   Docs: http://{host}:{port}/api/docs\n")
+    console.print(f"\n[bold]Entropy Server[/bold]  http://{host}:{port}")
+    console.print(f"  Swagger docs:  http://localhost:{port}/api/docs\n")
     uvicorn.run("entropy.api.main:app", host=host, port=port, reload=reload)
 
 
 @app.callback(invoke_without_command=True)
 def main(
-    version: bool = typer.Option(False, "--version", "-v", help="Show version"),
+    ctx: typer.Context = typer.Option(None),
+    version: bool = typer.Option(False, "--version", "-v", help="Show version and exit"),
 ):
     if version:
         console.print(f"entropy {__version__}")
@@ -388,7 +583,7 @@ def main(
 
 
 # ---------------------------------------------------------------------------
-# Output helpers
+# Rich output helpers
 # ---------------------------------------------------------------------------
 
 
@@ -400,24 +595,21 @@ def _print_summary(repo_name: str, scores, alerts):
     healthy = sum(1 for s in scores.values() if s.severity() == "HEALTHY")
     total = len(scores)
 
-    # Top panel with counts
-    c_bar = "█" * min(critical, 10) + "░" * max(10 - critical, 0)
-    h_bar = "█" * min(high, 10) + "░" * max(10 - high, 0)
-    m_bar = "█" * min(medium, 10) + "░" * max(10 - medium, 0)
-    g_bar = "█" * min(healthy, 10) + "░" * max(10 - healthy, 0)
+    def bar(n, max_n=10):
+        filled = min(int(n / max(total, 1) * max_n), max_n)
+        return "#" * filled + "." * (max_n - filled)
 
-    header = f"ENTROPY REPORT · {repo_name} · {datetime.now().strftime('%Y-%m-%d')}"
-
+    header = f"ENTROPY REPORT  {repo_name}  {datetime.now().strftime('%Y-%m-%d')}"
     panel_text = (
-        f"  [bold red]Critical (>85):[/bold red]  {c_bar}  {critical}\n"
-        f"  [bold yellow]High    (70-85):[/bold yellow]  {h_bar}  {high}\n"
-        f"  [bold cyan]Medium  (50-70):[/bold cyan]  {m_bar}  {medium}\n"
-        f"  [bold green]Healthy  (<50):[/bold green]  {g_bar}  {healthy}\n"
+        f"  [bold red]Critical (>85): [/bold red] {bar(critical)}  {critical}\n"
+        f"  [bold yellow]High    (70-85):[/bold yellow] {bar(high)}  {high}\n"
+        f"  [bold cyan]Medium  (50-70):[/bold cyan] {bar(medium)}  {medium}\n"
+        f"  [bold green]Healthy  (<50): [/bold green] {bar(healthy)}  {healthy}\n"
     )
 
     console.print(Panel(panel_text, title=f"[bold]{header}[/bold]", box=box.DOUBLE, expand=False))
 
-    # Show top critical/high modules
+    # Show worst modules (critical + high only)
     worst = sorted(scores.values(), key=lambda s: s.entropy_score, reverse=True)
     shown = 0
     for s in worst:
@@ -429,143 +621,581 @@ def _print_summary(repo_name: str, scores, alerts):
         color = _severity_color(severity)
         arrow = _trend_arrow(s.trend_per_month)
         console.print(
-            f"  {s.module_path:<50} [{color}][{s.entropy_score:.0f}] {_severity_icon(severity)} "
-            f"{severity}[/{color}] {arrow} {s.trend_per_month:+.1f}/mo"
+            f"  {s.module_path:<55} [{color}][{s.entropy_score:.0f}] "
+            f"{_severity_icon(severity)} {severity}[/{color}] "
+            f"{arrow} {s.trend_per_month:+.1f}/mo"
         )
         shown += 1
 
-    if alerts:
-        console.print(f"\n  [bold]{len(alerts)} alerts fired[/bold]")
-
-    console.print(f"\n  [dim]Scanned {total} modules[/dim]\n")
+    console.print(f"\n  [bold]{len(alerts)} alerts fired[/bold]")
+    console.print(f"  [dim]Scanned {total} modules[/dim]\n")
 
 
-def _print_report_table(repo_name: str, sorted_scores):
-    """Print a full report table."""
-    console.print(f"\n[bold]📊 Entropy Report — {repo_name}[/bold]\n")
+def _print_report_table(repo_name: str, sorted_scores, verbose: bool = False):
+    """Full module table sorted by entropy score."""
+    console.print(f"\n[bold]Entropy Report -- {repo_name}[/bold]\n")
 
     table = Table(box=box.ROUNDED, show_lines=False)
-    table.add_column("Module", style="white", max_width=50)
+    table.add_column("Module", max_width=55, no_wrap=True)
     table.add_column("Score", justify="right", width=6)
-    table.add_column("Knowledge", justify="right", width=10)
-    table.add_column("Deps", justify="right", width=6)
-    table.add_column("Churn", justify="right", width=6)
-    table.add_column("Age", justify="right", width=6)
-    table.add_column("Blast", justify="right", width=6)
-    table.add_column("Bus", justify="right", width=4)
-    table.add_column("Severity", justify="center", width=10)
+    if verbose:
+        table.add_column("Knowl.", justify="right", width=7)
+        table.add_column("Deps", justify="right", width=5)
+        table.add_column("Churn", justify="right", width=6)
+        table.add_column("Age", justify="right", width=5)
+        table.add_column("Blast", justify="right", width=6)
+        table.add_column("Bus", justify="right", width=4)
+        table.add_column("Severity", justify="center", width=11)
+    else:
+        table.add_column("Severity", justify="center", width=11)
+        table.add_column("Trend", justify="right", width=6)
 
+    shown = 0
     for s in sorted_scores:
+        # Skip zero-score modules (files with no git history — e.g. docs)
+        if s.entropy_score == 0 and s.knowledge_score == 0:
+            continue
         severity = s.severity()
         color = _severity_color(severity)
-        table.add_row(
-            s.module_path,
+        norm_path = s.module_path.replace("\\", "/")
+        is_test = any(part in norm_path for part in ("/tests/", "/test/", "test_", "_test.py"))
+        # Add [T] badge to visually distinguish test files
+        test_badge = " [dim][T][/dim]" if is_test else ""
+        path_display = s.module_path + test_badge
+
+        row = [
+            path_display,
             f"[{color}]{s.entropy_score:.0f}[/{color}]",
-            f"{s.knowledge_score:.0f}",
-            f"{s.dep_score:.0f}",
-            f"{s.churn_score:.0f}",
-            f"{s.age_score:.0f}",
-            str(s.blast_radius),
-            str(s.bus_factor),
-            f"[{color}]{severity}[/{color}]",
-        )
+        ]
+
+        if verbose:
+            row.extend([
+                f"{s.knowledge_score:.0f}",
+                f"{s.dep_score:.0f}",
+                f"{s.churn_score:.0f}",
+                f"{s.age_score:.0f}",
+                str(s.blast_radius),
+                str(s.bus_factor),
+                f"[{color}]{severity}[/{color}]",
+            ])
+        else:
+            arrow = _trend_arrow(s.trend_per_month)
+            trend_str = f"{arrow} {s.trend_per_month:+.1f}" if s.trend_per_month else "--"
+            row.extend([
+                f"[{color}]{severity}[/{color}]",
+                trend_str
+            ])
+
+        table.add_row(*row)
+        shown += 1
 
     console.print(table)
-    console.print()
+    if not verbose:
+        console.print("  [dim]Tip: Use --verbose to see full signal breakdown[/dim]")
+    console.print(f"  [dim]{shown} modules shown[/dim]\n")
 
 
 def _print_inspect(score, fc):
-    """Print full module inspection output."""
+    """Full module inspection output."""
     severity = score.severity()
     color = _severity_color(severity)
 
     console.print(f"\n[bold]Module: {score.module_path}[/bold]")
-    console.print("─" * 60)
-    console.print(f"  Entropy Score:       [{color}]{score.entropy_score:.0f} / 100 {_severity_icon(severity)} {severity}[/{color}]")
-    console.print(f"  Knowledge Decay:     {score.knowledge_score:.0f} / 100  ({score.authors_active} of {score.authors_total} authors active)")
-    console.print(f"  Dependency Decay:    {score.dep_score:.0f} / 100")
-    console.print(f"  Churn-to-Touch:      {score.churn_score:.0f} / 100  ({score.churn_commits} churn / {score.refactor_commits} refactor)")
-    console.print(f"  Age Without Refactor:{score.age_score:.0f} / 100  ({score.months_since_refactor:.1f} months)")
-    console.print(f"  Trajectory:          {score.trend_per_month:+.1f} entropy points / month")
+    console.print("-" * 60)
+    console.print(
+        f"  Entropy Score       [{color}]{score.entropy_score:.0f} / 100  "
+        f"{_severity_icon(severity)} {severity}[/{color}]"
+    )
+    console.print(
+        f"  Knowledge Decay     {score.knowledge_score:.0f} / 100  "
+        f"({score.authors_active} of {score.authors_total} authors active)"
+    )
+    console.print(f"  Dependency Decay    {score.dep_score:.0f} / 100")
+    console.print(
+        f"  Churn-to-Touch      {score.churn_score:.0f} / 100  "
+        f"({score.churn_commits} churn / {score.refactor_commits} refactor)"
+    )
+    console.print(
+        f"  Age w/o Refactor    {score.age_score:.0f} / 100  "
+        f"({score.months_since_refactor:.1f} months)"
+    )
+    console.print(f"  Trend               {score.trend_per_month:+.1f} pts/month")
     console.print()
     console.print("  Forecast:")
-    console.print(f"    30 days → {fc.score_30d:.0f}")
-    console.print(f"    60 days → {fc.score_60d:.0f}")
-    console.print(f"    90 days → {fc.score_90d:.0f}")
+    console.print(f"    30 days -> {fc.score_30d:.0f}")
+    console.print(f"    60 days -> {fc.score_60d:.0f}")
+    console.print(f"    90 days -> {fc.score_90d:.0f}")
 
     if fc.days_to_unmaintainable:
-        console.print(f"\n  [bold red]Estimated unmaintainable: ~{fc.days_to_unmaintainable // 30} months[/bold red]")
+        console.print(
+            f"\n  [bold red]WARNING: Unmaintainable in ~{fc.days_to_unmaintainable // 30} months[/bold red]"
+        )
 
-    console.print(f"\n  Blast Radius: {score.blast_radius} modules import this file")
+    console.print(f"\n  Blast Radius  {score.blast_radius} modules depend on this file")
     if score.bus_factor <= 1:
-        console.print(f"  Bus Factor:   [bold red]{score.bus_factor} ← CRITICAL single point of knowledge[/bold red]")
+        console.print(f"  Bus Factor    [bold red]{score.bus_factor} <- CRITICAL: single point of knowledge[/bold red]")
     else:
-        console.print(f"  Bus Factor:   {score.bus_factor}")
+        console.print(f"  Bus Factor    {score.bus_factor} engineers own this file")
     console.print()
 
 
 def _export_html(repo_name: str, sorted_scores):
-    """Export a full report as an HTML file."""
+    """Export a clean, minimal, professional engineering-report HTML (UTF-8)."""
+    # Compute summary stats
+    # Filter out unscored files (e.g. docs without git history)
+    valid_scores = [s for s in sorted_scores if not (s.entropy_score == 0 and s.knowledge_score == 0)]
+    total = len(valid_scores)
+    critical = sum(1 for s in valid_scores if s.severity() == "CRITICAL")
+    high     = sum(1 for s in valid_scores if s.severity() == "HIGH")
+    medium   = sum(1 for s in valid_scores if s.severity() == "MEDIUM")
+    healthy  = sum(1 for s in valid_scores if s.severity() == "HEALTHY")
+
+    # Severity bar segments (proportional widths)
+    def pct(n): return round(n / max(total, 1) * 100, 1)
+
+    severity_bar = (
+        f'<span class="seg-critical" style="width:{pct(critical)}%" title="Critical: {critical}"></span>'
+        f'<span class="seg-high" style="width:{pct(high)}%" title="High: {high}"></span>'
+        f'<span class="seg-medium" style="width:{pct(medium)}%" title="Medium: {medium}"></span>'
+        f'<span class="seg-healthy" style="width:{pct(healthy)}%" title="Healthy: {healthy}"></span>'
+    )
+
+    # Table rows
     rows = ""
     for s in sorted_scores:
-        severity = s.severity()
-        color_map = {"CRITICAL": "#ef4444", "HIGH": "#f59e0b", "MEDIUM": "#06b6d4", "HEALTHY": "#22c55e"}
-        color = color_map.get(severity, "#ffffff")
+        if s.entropy_score == 0 and s.knowledge_score == 0:
+            continue
+        sev = s.severity()
+        sev_class = sev.lower()
+        bus_warn = " bus-warn" if s.bus_factor <= 1 else ""
         rows += f"""
         <tr>
-            <td>{s.module_path}</td>
-            <td style="color:{color};font-weight:bold;">{s.entropy_score:.0f}</td>
-            <td>{s.knowledge_score:.0f}</td>
-            <td>{s.dep_score:.0f}</td>
-            <td>{s.churn_score:.0f}</td>
-            <td>{s.age_score:.0f}</td>
-            <td>{s.blast_radius}</td>
-            <td>{s.bus_factor}</td>
-            <td style="color:{color};font-weight:bold;">{severity}</td>
+          <td class="col-path"><span class="path">{s.module_path}</span></td>
+          <td class="col-num"><span class="score-pill {sev_class}">{s.entropy_score:.0f}</span></td>
+          <td class="col-num">{s.knowledge_score:.0f}</td>
+          <td class="col-num">{s.dep_score:.0f}</td>
+          <td class="col-num">{s.churn_score:.0f}</td>
+          <td class="col-num">{s.age_score:.0f}</td>
+          <td class="col-num">{s.blast_radius}</td>
+          <td class="col-num{bus_warn}">{s.bus_factor}</td>
+          <td><span class="badge {sev_class}">{sev}</span></td>
         </tr>"""
+
+    # Average score for context
+    all_scores = [s.entropy_score for s in sorted_scores if not (s.entropy_score == 0 and s.knowledge_score == 0)]
+    avg_score = sum(all_scores) / max(len(all_scores), 1)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <title>Entropy Report — {repo_name}</title>
-    <style>
-        body {{ font-family: 'Inter', -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; padding: 2rem; }}
-        h1 {{ color: #f8fafc; font-size: 1.5rem; }}
-        table {{ border-collapse: collapse; width: 100%; margin-top: 1rem; }}
-        th {{ background: #1e293b; padding: 0.75rem; text-align: left; font-weight: 600; border-bottom: 2px solid #334155; }}
-        td {{ padding: 0.5rem 0.75rem; border-bottom: 1px solid #1e293b; }}
-        tr:hover {{ background: #1e293b; }}
-        .meta {{ color: #94a3b8; font-size: 0.875rem; margin-top: 0.5rem; }}
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Entropy Report &mdash; {repo_name}</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+    :root {{
+      --bg:        #0c0c10;
+      --bg-card:   #13131a;
+      --bg-row:    #16161f;
+      --bg-row-alt:#111118;
+      --border:    #1f1f2e;
+      --text:      #d4d4e8;
+      --text-dim:  #5a5a78;
+      --text-label:#9090b0;
+      --accent:    #5b5bd6;
+      --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      /* severity */
+      --c-critical:#f87171;
+      --c-high:    #fb923c;
+      --c-medium:  #38bdf8;
+      --c-healthy: #34d399;
+    }}
+
+    body {{
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }}
+
+    a {{ color: var(--accent); text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+
+    /* ── layout ── */
+    .page {{ max-width: 1200px; margin: 0 auto; padding: 48px 32px 80px; }}
+
+    /* ── header ── */
+    .header {{
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 24px;
+      margin-bottom: 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      flex-wrap: wrap;
+      gap: 16px;
+    }}
+    .header-left h1 {{
+      font-size: 1.4rem;
+      font-weight: 600;
+      color: #fff;
+      letter-spacing: -0.02em;
+    }}
+    .header-left .repo-path {{
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      margin-top: 4px;
+    }}
+    .header-right {{
+      text-align: right;
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      line-height: 1.8;
+    }}
+    .header-right .tool-badge {{
+      display: inline-block;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--accent);
+      margin-bottom: 4px;
+    }}
+
+    /* ── severity bar ── */
+    .sev-bar-wrap {{ margin-bottom: 32px; }}
+    .sev-bar-label {{
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 8px;
+    }}
+    .sev-bar {{
+      display: flex;
+      height: 6px;
+      border-radius: 3px;
+      overflow: hidden;
+      background: var(--border);
+    }}
+    .sev-bar span {{ display: block; min-width: 2px; transition: width 0.3s; }}
+    .seg-critical {{ background: var(--c-critical); }}
+    .seg-high     {{ background: var(--c-high); }}
+    .seg-medium   {{ background: var(--c-medium); }}
+    .seg-healthy  {{ background: var(--c-healthy); }}
+
+    /* ── stats grid ── */
+    .stats-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 40px;
+    }}
+    .stat {{
+      background: var(--bg-card);
+      padding: 18px 20px;
+    }}
+    .stat-label {{
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-dim);
+      margin-bottom: 6px;
+    }}
+    .stat-value {{
+      font-family: var(--font-mono);
+      font-size: 1.6rem;
+      font-weight: 700;
+      line-height: 1;
+      color: #fff;
+    }}
+    .stat-value.critical {{ color: var(--c-critical); }}
+    .stat-value.high     {{ color: var(--c-high); }}
+    .stat-value.medium   {{ color: var(--c-medium); }}
+    .stat-value.healthy  {{ color: var(--c-healthy); }}
+
+    /* ── section title ── */
+    .section-title {{
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-dim);
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }}
+
+    /* ── table ── */
+    .table-wrap {{
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 40px;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }}
+    thead th {{
+      background: var(--bg-card);
+      padding: 10px 14px;
+      text-align: left;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-label);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }}
+    thead th:not(:first-child) {{ text-align: right; }}
+    tbody tr {{ border-bottom: 1px solid var(--border); }}
+    tbody tr:last-child {{ border-bottom: none; }}
+    tbody tr:nth-child(odd)  {{ background: var(--bg-row-alt); }}
+    tbody tr:nth-child(even) {{ background: var(--bg-row); }}
+    tbody tr:hover {{ background: #1c1c28; }}
+    td {{
+      padding: 9px 14px;
+      vertical-align: middle;
+    }}
+    .col-path {{ width: 42%; }}
+    .col-num  {{ text-align: right; font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-label); }}
+    .path {{
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      color: var(--text);
+      word-break: break-all;
+    }}
+    .bus-warn {{ color: var(--c-critical) !important; font-weight: 700; }}
+
+    /* score pill in Score column */
+    .score-pill {{
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      font-weight: 700;
+      min-width: 30px;
+      text-align: center;
+    }}
+    .score-pill.critical {{ color: var(--c-critical); }}
+    .score-pill.high     {{ color: var(--c-high); }}
+    .score-pill.medium   {{ color: var(--c-medium); }}
+    .score-pill.healthy  {{ color: var(--text-label); }}
+
+    /* severity badge */
+    .badge {{
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 3px;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-family: var(--font-mono);
+    }}
+    .badge.critical {{ background: rgba(248,113,113,0.12); color: var(--c-critical); }}
+    .badge.high     {{ background: rgba(251,146, 60,0.12); color: var(--c-high); }}
+    .badge.medium   {{ background: rgba( 56,189,248,0.12); color: var(--c-medium); }}
+    .badge.healthy  {{ background: rgba( 52,211,153,0.10); color: var(--c-healthy); }}
+
+    /* ── column legend ── */
+    .legend {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 40px;
+    }}
+    .legend-item {{
+      background: var(--bg-card);
+      padding: 14px 18px;
+    }}
+    .legend-key {{
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--accent);
+      margin-bottom: 4px;
+    }}
+    .legend-desc {{
+      font-size: 0.78rem;
+      color: var(--text-label);
+      line-height: 1.5;
+    }}
+
+    /* ── about strip ── */
+    .about {{
+      border-top: 1px solid var(--border);
+      padding-top: 24px;
+      margin-top: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+    }}
+    .about-text {{
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      max-width: 560px;
+      line-height: 1.6;
+    }}
+    .about-text strong {{ color: var(--text-label); }}
+    .about-links {{
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      text-align: right;
+    }}
+  </style>
 </head>
 <body>
-    <h1>🔬 Entropy Report — {repo_name}</h1>
-    <p class="meta">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+<div class="page">
+
+  <!-- ── HEADER ──────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-left">
+      <h1>Entropy Report &mdash; {repo_name}</h1>
+      <div class="repo-path">{repo_name}/</div>
+    </div>
+    <div class="header-right">
+      <div class="tool-badge">entropy {__version__}</div><br>
+      <span>Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}</span><br>
+      <span>Analysis window: last 24 months of commits</span>
+    </div>
+  </header>
+
+  <!-- ── SEVERITY BAR ─────────────────────────────────── -->
+  <div class="sev-bar-wrap">
+    <div class="sev-bar-label">Overall health distribution</div>
+    <div class="sev-bar">{severity_bar}</div>
+  </div>
+
+  <!-- ── STATS GRID ───────────────────────────────────── -->
+  <div class="stats-grid">
+    <div class="stat">
+      <div class="stat-label">Total Modules</div>
+      <div class="stat-value">{total}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Avg Score</div>
+      <div class="stat-value">{avg_score:.1f}<span style="font-size:1rem;color:var(--text-dim)">/100</span></div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Critical</div>
+      <div class="stat-value critical">{critical}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">High</div>
+      <div class="stat-value high">{high}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Medium</div>
+      <div class="stat-value medium">{medium}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Healthy</div>
+      <div class="stat-value healthy">{healthy}</div>
+    </div>
+  </div>
+
+  <!-- ── MODULE TABLE ─────────────────────────────────── -->
+  <div class="section-title">Module Scores (sorted by entropy)</div>
+  <div class="table-wrap">
     <table>
-        <thead>
-            <tr>
-                <th>Module</th>
-                <th>Score</th>
-                <th>Knowledge</th>
-                <th>Deps</th>
-                <th>Churn</th>
-                <th>Age</th>
-                <th>Blast</th>
-                <th>Bus</th>
-                <th>Severity</th>
-            </tr>
-        </thead>
-        <tbody>{rows}
-        </tbody>
+      <thead>
+        <tr>
+          <th>Module Path</th>
+          <th title="Composite entropy score 0-100">Score</th>
+          <th title="Knowledge Decay: % of all-time contributors who are no longer active">Knowledge</th>
+          <th title="Dependency Decay: staleness of third-party packages used by this module">Deps</th>
+          <th title="Churn: ratio of churn commits to refactor commits">Churn</th>
+          <th title="Age: months since the last meaningful refactor">Age</th>
+          <th title="Blast Radius: how many modules transitively import this one">Blast</th>
+          <th title="Bus Factor: active engineers with &gt;10% ownership — red = 1 (single point of failure)">Bus</th>
+          <th>Severity</th>
+        </tr>
+      </thead>
+      <tbody>{rows}
+      </tbody>
     </table>
+  </div>
+
+  <!-- ── COLUMN LEGEND ────────────────────────────────── -->
+  <div class="section-title">Column Reference</div>
+  <div class="legend">
+    <div class="legend-item">
+      <div class="legend-key">Score (0 &ndash; 100)</div>
+      <div class="legend-desc">Composite entropy. Weighted sum of all four signals. Higher = more decayed, harder to safely modify.</div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-key">Knowledge</div>
+      <div class="legend-desc">What fraction of a file&rsquo;s all-time contributors are still active (past 180 days). 100 = nobody who wrote this is still around.</div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-key">Deps</div>
+      <div class="legend-desc">Staleness of third-party packages imported by this file. Based on months behind latest PyPI release &times; release velocity.</div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-key">Churn</div>
+      <div class="legend-desc">Ratio of churn commits (large, unfocused changes) to refactor commits (structural improvements). High churn = instability.</div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-key">Age</div>
+      <div class="legend-desc">Months since the last meaningful refactor commit. Files that grow old without being restructured accumulate hidden complexity.</div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-key">Blast</div>
+      <div class="legend-desc">Blast radius: number of modules that transitively import this one. A high-entropy file with a large blast radius can cascade failures widely.</div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-key">Bus</div>
+      <div class="legend-desc">Bus factor: active contributors with &gt;10% code ownership. <strong style="color:var(--c-critical)">1 = single point of knowledge failure</strong> &mdash; if that person leaves, institutional memory is lost.</div>
+    </div>
+    <div class="legend-item">
+      <div class="legend-key">Severity Thresholds</div>
+      <div class="legend-desc">
+        <span class="badge critical">Critical</span> &ge;85 &nbsp;
+        <span class="badge high">High</span> &ge;70 &nbsp;
+        <span class="badge medium">Medium</span> &ge;50 &nbsp;
+        <span class="badge healthy">Healthy</span> &lt;50
+      </div>
+    </div>
+  </div>
+
+  <!-- ── ABOUT ────────────────────────────────────────── -->
+  <footer class="about">
+    <div class="about-text">
+      <strong>What is Entropy?</strong> Entropy is a code aging &amp; decay tracker. It measures how risky each module in a codebase has become over time &mdash; not by static analysis, but by reading the project&rsquo;s actual git history. It surfaces which files are losing their maintainers, accumulating dependencies nobody updates, being churned without refactoring, and approaching the point where no engineer fully understands them anymore.
+    </div>
+    <div class="about-links">
+      entropy-tracker &middot; v{__version__}<br>
+      <span style="color:var(--text-dim)">pip install -e .</span>
+    </div>
+  </footer>
+
+</div>
 </body>
 </html>"""
 
     output_path = f"entropy-report-{repo_name}.html"
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
-    console.print(f"\n[green]✓ Report exported to {output_path}[/green]\n")
+    console.print(f"  [green]Report exported:[/green] {output_path}\n")
+
 
 
 if __name__ == "__main__":

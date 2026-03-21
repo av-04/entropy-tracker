@@ -1,155 +1,81 @@
-# 🔬 Entropy — A Code Aging & Decay Tracker
+# Entropy
 
-**Your codebase is aging. Entropy shows you where.**
+The engineer who wrote `payments/gateway.py` left 18 months ago. Nobody else understands it. Entropy tells you that before production goes down.
 
-Entropy computes a **decay score per module** in your codebase by analyzing git history, dependency drift, churn patterns, and knowledge silos. It tells you which parts of your code are silently becoming dangerous — before they break.
+![Entropy Report Output](./assets/demo.png)
 
-```
-$ entropy scan ./my-repo
+Software does not just accumulate bugs. It **ages**. Code written three years ago, never touched, slowly becomes dangerous — not because it broke, but because the world around it changed. The library it depends on evolved. The external API it calls shifted its contract. The engineers who wrote it have left. 
 
-┌─────────────────────────────────────────────────────────┐
-│ ENTROPY REPORT · my-repo · 2024-06-01                   │
-├─────────────────────────────────────────────────────────┤
-│ Critical (>85):  3  ████░░░░░░                          │
-│ High    (70-85): 8  ████████░░                          │
-│ Medium  (50-70): 12                                     │
-│ Healthy  (<50):  24                                     │
-└─────────────────────────────────────────────────────────┘
+This is **software entropy**. Entropy is a continuously-running analysis engine that combines git history, dependency drift, and code churn into a single decay score per module, and projects it forward in time.
 
-payments/gateway.py       [87] ⚠ CRITICAL  ↑  +3.2/mo
-auth/legacy_tokens.py     [91] ⚠ CRITICAL  ↑↑ +5.1/mo
-core/database/connector.py[83] ▲ HIGH      →  +0.8/mo
-```
+---
 
 ## Quick Start
 
+Get your first risk score in 3 commands:
+
 ```bash
+# Install the CLI
 pip install entropy-tracker
+
+# Register a repository and run the first scan
 entropy init ./my-repo
+
+# See your most decayed, highest-risk modules
 entropy report --top 10
 ```
 
-## The Four Decay Signals
+---
 
-| Signal | What It Measures |
-|--------|------------------|
-| **Knowledge Decay** | % of authors who touched this module that are still active. A module where 5 of 6 authors have gone inactive is a knowledge silo. |
-| **Dependency Decay** | How far behind this module's dependencies are, weighted by ecosystem velocity. |
-| **Churn-to-Touch Ratio** | Ratio of chaotic edits to intentional refactors. High churn with no refactoring = invisible debt. |
-| **Age Without Refactor** | Months since the last commit that was primarily restructuring. |
+## What Entropy Measures
 
-## CLI Commands
+Entropy combines four distinct signals into one module-level composite score (0–100):
+
+| Signal | What it measures | Why it matters |
+|--------|-----------------|----------------|
+| **Knowledge Decay** | % of authors who touched this module that are still active | A module where 5 of 6 authors have gone inactive is a knowledge silo. |
+| **Dependency Decay** | How far behind this module's direct dependencies are | A 12-month-old dep in a fast-moving ecosystem is riskier than a stable one. |
+| **Churn-to-Touch** | Ratio of chaotic edits to intentional refactors | High churn with no refactoring = technical debt accumulating invisibly. |
+| **Age Without Refactor** | Months since the last structural refactor | Old code that is never deliberately revisited drifts from team understanding. |
+
+### The Entropy Output
+
+Modules are scored from 0 to 100:
+- **0–50 (Healthy):** Active authors, up-to-date dependencies, regular refactoring.
+- **50–70 (Medium):** Aging code. Starting to drift.
+- **70–85 (High):** Risky to touch. Single points of failure emerging.
+- **85–100 (Critical):** A fire hazard. Do not ship features through this without remediation. 
+
+You can inspect exactly why a file is failing:
+```bash
+entropy inspect payments/gateway.py
+```
+
+### Advanced Forecasting & Alerts
+
+Because Entropy stores scores over time, it computes the **decay velocity** of each module and projects forward.
 
 ```bash
-entropy init ./repo              # Register repo, run first scan
-entropy scan ./repo              # Run scan now, update DB
-entropy report                   # All modules sorted by entropy
-entropy report --top 10          # Worst 10 modules
-entropy inspect path/to/file.py  # Full breakdown: signals, forecast, blast radius
-entropy trend --last 90days      # Repo entropy trajectory
-entropy diff --since 7days       # Which modules got worse this week
-entropy forecast path/to/file.py # Projected entropy at 30/60/90 days
-entropy report --format html     # Export full report as HTML
-entropy server                   # Start the dashboard on localhost:8000
+entropy forecast payments/gateway.py
+# Output:
+# 30 days → 90 (CRITICAL)
+# 90 days → 97 (CRITICAL)
+# Estimated unmaintainable: ~4 months
 ```
 
-## Architecture
+---
 
-```
-┌──────────────────────────────────────────┐
-│              ENTROPY ENGINE              │
-│                                          │
-│ ┌─────────────┐ ┌───────────┐ ┌────────┐│
-│ │Git Analyzer  │ │Dep Analyzer│ │AST     ││
-│ │(PyDriller)   │ │(PyPI API)  │ │Analyzer││
-│ └──────┬───────┘ └─────┬─────┘ └───┬────┘│
-│        └───────────────┼───────────┘     │
-│                        ▼                 │
-│              ┌─────────────────┐         │
-│              │  Signal Merger  │         │
-│              └────────┬────────┘         │
-│                       ▼                  │
-│              ┌─────────────────┐         │
-│              │ Entropy Scorer  │         │
-│              │  + Forecaster   │         │
-│              └────────┬────────┘         │
-│                       ▼                  │
-│        ┌──────────────────────────┐      │
-│        │ PostgreSQL + TimescaleDB │      │
-│        └──────────────────────────┘      │
-│                       ▼                  │
-│  ┌───────────────────────────────────┐   │
-│  │  FastAPI  │  Celery Beat Scheduler│   │
-│  └───────────────────────────────────┘   │
-│                       ▼                  │
-│       ┌─────────────────────────┐        │
-│       │  CLI (Typer + Rich)     │        │
-│       │  Dashboard (React)      │        │
-│       └─────────────────────────┘        │
-└──────────────────────────────────────────┘
-```
+## Architecture 
 
-## Tech Stack
+Entropy runs entirely locally with zero external telemetry. The architecture includes:
+- **Git Analyzer:** PyDriller + GitPython extract author decay and churn ratios.
+- **Dep Analyzer:** PyPI API concurrent requests + pip-audit identify drift.
+- **TimescaleDB:** Time-series storage for continuous scoring and forecasting.
+- **FastAPI / Celery:** Optional background scheduler to continuously monitor repositories overnight.
 
-| Layer | Technology |
-|-------|-----------|
-| Core Engine | Python 3.11+ |
-| Git Analysis | PyDriller + GitPython |
-| Dep Analysis | PyPI JSON API + pip-audit |
-| Static Analysis | Python `ast` module |
-| Time-Series DB | PostgreSQL + TimescaleDB |
-| Background Jobs | Celery + Redis |
-| API | FastAPI |
-| CLI | Typer + Rich |
-| Dashboard | React + Recharts |
-| Containers | Docker + Docker Compose |
+## Roadmap & v2 Features
 
-## Running with Docker
-
-```bash
-# Development
-docker compose up
-
-# Production
-DB_PASSWORD=your_secret docker compose -f docker-compose.prod.yml up -d
-```
-
-## Configuration — `entropy.toml`
-
-```toml
-[scoring.weights]
-knowledge = 0.35    # highest: lost knowledge is hardest to recover
-dependency = 0.30   # CVEs and drift are measurable risk
-churn = 0.20        # invisible debt accumulation
-age = 0.15          # time since last deliberate attention
-
-[scoring.thresholds]
-critical = 85
-high = 70
-medium = 50
-
-[analysis]
-active_author_window_days = 180
-age_ceiling_months = 36
-```
-
-## Roadmap
-
-- [x] Dependency age decay score
-- [x] Knowledge decay via git history
-- [x] Churn-to-touch ratio
-- [x] Entropy score per module
-- [x] Trajectory prediction + forecast
-- [x] Blast radius detection
-- [x] Bus factor per module
-- [x] CLI with Rich output
-- [x] TimescaleDB time-series history
-- [x] FastAPI + Celery scheduler
-- [ ] React dashboard (v2)
-- [ ] External API contract drift detection
-- [ ] Test coverage decay over time
-- [ ] JavaScript / TypeScript repo support
-
-## License
-
-MIT
+We are actively building features to embed Entropy permanently in engineering workflows:
+- **PR-level Diffing:** `entropy diff --base main` to block PRs that increase complexity on undocumented modules.
+- **Simulations:** "What happens to the codebase if Engineer X leaves?"
+- **Ecosystem Expansion:** Full JavaScript / TypeScript support.

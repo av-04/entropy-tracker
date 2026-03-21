@@ -5,7 +5,7 @@ services:
   postgres:
     image: timescale/timescaledb:latest-pg15
     ports:
-      - "5432:5432"
+      - "5433:5432"
     environment:
       POSTGRES_DB: entropy
       POSTGRES_USER: postgres
@@ -43,6 +43,7 @@ services:
       REDIS_URL: redis://redis:6379/0
     volumes:
       - ./entropy:/app/entropy
+      - ./dashboard:/app/dashboard
       - ./repos:/repos  # mount repos to scan
 
   celery:
