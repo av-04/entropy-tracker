@@ -4,14 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "entropy-tracker"
-version = "1.0.0"
-description = "A Code Aging & Decay Tracker — measures software entropy per module using git analysis, dependency drift, churn ratios, and knowledge decay signals."
+version = "1.0.1"
+description = "A Code Aging & Decay Tracker - measures software entropy per module using git analysis, dependency drift, churn ratios, and knowledge decay signals."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 authors = [
-    {name = "Entropy Team"},
+    {name = "Hari om Singh", email = "singh.omhari715@gmail.com"}
 ]
+
+[tool.setuptools.metadata]
+author = "Hari om Singh"
+
 keywords = ["entropy", "code-aging", "decay", "technical-debt", "git-analysis"]
 classifiers = [
     "Development Status :: 4 - Beta",

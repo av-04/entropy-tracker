@@ -648,6 +648,7 @@ def _print_report_table(repo_name: str, sorted_scores, verbose: bool = False):
         table.add_column("Severity", justify="center", width=11)
     else:
         table.add_column("Severity", justify="center", width=11)
+        table.add_column("Blast", justify="right", width=6)
         table.add_column("Trend", justify="right", width=6)
 
     shown = 0
@@ -683,6 +684,7 @@ def _print_report_table(repo_name: str, sorted_scores, verbose: bool = False):
             trend_str = f"{arrow} {s.trend_per_month:+.1f}" if s.trend_per_month else "--"
             row.extend([
                 f"[{color}]{severity}[/{color}]",
+                str(s.blast_radius),
                 trend_str
             ])
 
@@ -1068,7 +1070,7 @@ def _export_html(repo_name: str, sorted_scores):
   <!-- ── HEADER ──────────────────────────────────────── -->
   <header class="header">
     <div class="header-left">
-      <h1>Entropy Report &mdash; {repo_name}</h1>
+      <h1>Entropy Report - {repo_name}</h1>
       <div class="repo-path">{repo_name}/</div>
     </div>
     <div class="header-right">
