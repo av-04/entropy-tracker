@@ -566,10 +566,19 @@ def server(
     reload: bool = typer.Option(False, "--reload"),
 ):
     """Start the Entropy API server and dashboard."""
-    import uvicorn
+    try:
+        import uvicorn
+    except ImportError:
+        console.print(
+            "\n[bold red]Server dependencies not installed.[/bold red]\n"
+            "  The [bold]entropy server[/bold] command requires the server extras:\n\n"
+            "    [bold cyan]pip install \"entropy-tracker[server]\"[/bold cyan]\n"
+        )
+        raise typer.Exit(1)
     console.print(f"\n[bold]Entropy Server[/bold]  http://{host}:{port}")
     console.print(f"  Swagger docs:  http://localhost:{port}/api/docs\n")
     uvicorn.run("entropy.api.main:app", host=host, port=port, reload=reload)
+
 
 
 @app.callback(invoke_without_command=True)

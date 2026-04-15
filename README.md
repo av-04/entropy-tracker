@@ -31,7 +31,7 @@ pip install entropy-tracker
 ```
 
 **Requirements:** Python 3.10+, Git in your system PATH.
-**No API keys. No telemetry.** Code analysis runs entirely locally. Dependency checks query PyPI to detect version drift - no data about your code is sent anywhere.
+**No API keys. No telemetry.** Runs securely in your environment. Source code never leaves your machine. Dependency versions are checked via read-only queries to the public PyPI API.
 
 ---
 

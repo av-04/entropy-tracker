@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "entropy-tracker"
-version = "1.0.1"
+version = "1.0.2"
 description = "A Code Aging & Decay Tracker - measures software entropy per module using git analysis, dependency drift, churn ratios, and knowledge decay signals."
 readme = "README.md"
 license = {text = "MIT"}
@@ -24,34 +24,46 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 
+# ── Core CLI dependencies only ──────────────────────────────────────────────
+# These are all a user needs to run: entropy scan / report / inspect / diff
+# Heavy server stack is in the [server] optional extra below.
 dependencies = [
     "pydriller>=2.6",
     "gitpython>=3.1",
     "typer[all]>=0.9",
     "rich>=13.0",
-    "fastapi>=0.104",
-    "uvicorn[standard]>=0.24",
-    "sqlalchemy>=2.0",
-    "asyncpg>=0.29",
-    "psycopg2-binary>=2.9",
-    "celery[redis]>=5.3",
-    "redis>=5.0",
     "httpx>=0.25",
     "aiohttp>=3.8",
     "tomli>=2.0;python_version<'3.11'",
     "numpy>=1.26",
     "pydantic>=2.5",
     "pydantic-settings>=2.1",
+    "sqlalchemy>=2.0",
     "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
+# pip install "entropy-tracker[server]"
+# Enables: entropy server  (FastAPI + Celery dashboard backend)
+server = [
+    "fastapi>=0.104",
+    "uvicorn[standard]>=0.24",
+    "asyncpg>=0.29",
+    "psycopg2-binary>=2.9",
+    "celery[redis]>=5.3",
+    "redis>=5.0",
+]
 dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.23",
     "black>=23.0",
     "ruff>=0.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/hari715om/entropy-tracker"
+Repository = "https://github.com/hari715om/entropy-tracker"
+"Bug Tracker" = "https://github.com/hari715om/entropy-tracker/issues"
 
 [project.scripts]
 entropy = "entropy.cli:app"
