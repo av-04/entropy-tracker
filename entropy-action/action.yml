@@ -1,0 +1,41 @@
+name: "Entropy - Code Decay Check"
+description: "Detect high-entropy (decayed) files touched by this pull request. Flags modules that are dangerous to modify."
+author: "Hari om Singh"
+
+branding:
+  icon: "alert-triangle"
+  color: "orange"
+
+inputs:
+  base-branch:
+    description: "Base branch to diff entropy scores against."
+    required: false
+    default: "main"
+  fail-above:
+    description: >
+      Exit with code 1 (and fail the PR) if any changed file has an entropy
+      score above this value (0-100). Set to 0 to run in report-only mode
+      without blocking merges.
+    required: false
+    default: "0"
+  python-version:
+    description: "Python version to use when installing entropy-tracker."
+    required: false
+    default: "3.11"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install entropy-tracker
+      run: pip install entropy-tracker
+      shell: bash
+
+    - name: Run entropy diff
+      run: |
+        entropy diff . --base ${{ inputs.base-branch }} --fail-above ${{ inputs.fail-above }}
+      shell: bash

@@ -389,6 +389,13 @@ def trend(
 def diff(
     path: str = typer.Argument(".", help="Path to git repository"),
     base: str = typer.Option("main", "--base", "-b", help="Base branch to compare against"),
+    fail_above: int = typer.Option(
+        0,
+        "--fail-above",
+        "-f",
+        help="Exit with code 1 if any changed file has entropy score above this threshold. "
+             "Set to e.g. 75 to block PRs that touch high-risk modules. 0 = never fail.",
+    ),
 ):
     """Diff entropy scores for files changed between current branch and base branch."""
     import subprocess
@@ -410,7 +417,7 @@ def diff(
         console.print(f"[green]No Python files changed against {base}.[/green]")
         return
 
-    console.print(f"\n[bold]Entropy Diff  [{base} → HEAD][/bold]\n")
+    console.print(f"\n[bold]Entropy Diff  [{base} -> HEAD][/bold]\n")
 
     # 2. Score current branch (HEAD)
     console.print("[dim]Analyzing current branch (HEAD)...[/dim]")
@@ -452,19 +459,19 @@ def diff(
     for f_path in changed_normalized:
         head_score = 0.0
         base_score = 0.0
-        
+
         # Find in HEAD
         for hp, score_obj in head_scores.items():
             if hp.replace("\\", "/") == f_path:
                 head_score = score_obj.entropy_score
                 break
-                
+
         # Find in BASE
         for bp, score_obj in base_scores.items():
             if bp.replace("\\", "/") == f_path:
                 base_score = score_obj.entropy_score
                 break
-                
+
         delta = head_score - base_score
         total_delta += delta
         results.append((f_path, base_score, head_score, delta))
@@ -480,15 +487,19 @@ def diff(
     table.add_column("Scores", justify="center", width=12)
     table.add_column("Severity", justify="center", width=10)
 
+    failing_files = []
     for f_path, b_score, h_score, delta in results:
-        # Determine severity of head score manually if needed, or via dummy
         from entropy.scoring.scorer import ModuleScore
         severity = ModuleScore(module_path="", entropy_score=h_score).severity()
         color = _severity_color(severity)
-        
+
         delta_str = f"[red]+{delta:.1f}[/red]" if delta > 0 else (f"[green]{delta:+.1f}[/green]" if delta < 0 else f"[dim]{delta:+.1f}[/dim]")
-        score_str = f"{b_score:.0f} → [{color}]{h_score:.0f}[/{color}]"
-        
+        score_str = f"{b_score:.0f} -> [{color}]{h_score:.0f}[/{color}]"
+
+        # Track files that breach the --fail-above threshold
+        if fail_above > 0 and h_score > fail_above:
+            failing_files.append((f_path, h_score))
+
         table.add_row(
             f_path,
             delta_str,
@@ -497,14 +508,31 @@ def diff(
         )
 
     console.print(table)
-    
+
     net_color = "red" if total_delta > 0 else "green"
     console.print(f"\n  Net branch entropy delta: [{net_color}]{total_delta:+.1f}[/{net_color}] points across {len(results)} changed files")
-    
+
     if results:
         worst_file = results[0]
         if worst_file[2] >= 50:
-            console.print(f"  Highest risk: [bold]{worst_file[0]}[/bold] — review carefully\n")
+            console.print(f"  Highest risk: [bold]{worst_file[0]}[/bold] -- review carefully")
+
+    # 5. CI gate — exit non-zero if threshold breached
+    if failing_files:
+        console.print(
+            f"\n  [bold red]ENTROPY GATE FAILED[/bold red]  "
+            f"--fail-above {fail_above} threshold breached by {len(failing_files)} file(s):"
+        )
+        for fp, score in failing_files:
+            console.print(f"    [red]{fp}[/red]  score={score:.0f}")
+        console.print(
+            "\n  [dim]These files have high decay scores. Refactor or add documentation before merging.[/dim]\n"
+        )
+        raise typer.Exit(1)
+
+    console.print()
+
+
 
 
 
@@ -557,6 +585,76 @@ def forecast(
             f"({fc.days_to_unmaintainable // 30} months)[/bold red]"
         )
     console.print()
+
+
+@app.command()
+def simulate(
+    path: str = typer.Argument(".", help="Path to git repository"),
+    author_leaves: str = typer.Option(..., "--author-leaves", "-a", help="Author email to simulate leaving"),
+):
+    """Simulate the risk impact of an engineer leaving the team.
+
+    Re-computes bus factor for every module as if the specified author
+    no longer exists. Shows which files become single points of failure.
+    """
+    repo_path = Path(path).resolve()
+    console.print(f"\n[bold]Entropy Simulate  --author-leaves {author_leaves}[/bold]\n")
+    console.print("[dim]Running full scan to build author map...[/dim]\n")
+
+    scores, _, git_data = _run_full_scan(str(repo_path))
+
+    at_risk = []
+    for module_path, ms in scores.items():
+        gd = git_data.get(module_path)
+        if not gd:
+            continue
+
+        # Authors active in the window, before and after simulated departure
+        active_before: set = gd.authors_active if hasattr(gd, "authors_active") else set()
+        active_after = active_before - {author_leaves}
+
+        bus_before = ms.bus_factor
+        bus_after = len(active_after) if active_after else 0
+
+        # Only surface modules where the departure actually changes the risk picture
+        if bus_after < bus_before or (bus_after <= 1 and author_leaves in (gd.authors_all_time or set())):
+            at_risk.append((module_path, ms, bus_before, bus_after))
+
+    if not at_risk:
+        console.print(f"[green]No modules become single points of failure if {author_leaves} leaves.[/green]")
+        console.print("[dim](Either they authored nothing critical, or every file has multiple active owners.)[/dim]\n")
+        return
+
+    # Sort by worst final bus factor, then by entropy score
+    at_risk.sort(key=lambda x: (x[3], -x[2].entropy_score))
+
+    console.print(f"  [bold yellow]Warning:[/bold yellow] {len(at_risk)} module(s) become higher risk if [bold]{author_leaves}[/bold] leaves.\n")
+
+    table = Table(box=box.ROUNDED, show_lines=False)
+    table.add_column("Module", max_width=55, no_wrap=True)
+    table.add_column("Entropy", justify="right", width=8)
+    table.add_column("Bus Factor Before", justify="center", width=18)
+    table.add_column("Bus Factor After", justify="center", width=17)
+    table.add_column("Risk", justify="center", width=10)
+
+    critical_count = 0
+    for module_path, ms, bus_before, bus_after in at_risk:
+        severity = ms.severity()
+        color = _severity_color(severity)
+        after_color = "bold red" if bus_after <= 1 else "yellow"
+        if bus_after <= 1:
+            critical_count += 1
+        table.add_row(
+            module_path,
+            f"[{color}]{ms.entropy_score:.0f}[/{color}]",
+            str(bus_before),
+            f"[{after_color}]{bus_after}[/{after_color}]",
+            f"[{after_color}]{'CRITICAL' if bus_after <= 1 else 'HIGH'}[/{after_color}]",
+        )
+
+    console.print(table)
+    console.print(f"\n  [bold red]{critical_count} file(s) become sole-ownership (bus factor 0 or 1)[/bold red]")
+    console.print(f"  [dim]Recommendation: schedule knowledge transfer sessions for these modules before {author_leaves} leaves.[/dim]\n")
 
 
 @app.command()
