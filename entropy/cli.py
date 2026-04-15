@@ -1,17 +1,20 @@
 """
-Entropy CLI — full-featured terminal interface for engineers.
+Entropy CLI -- full-featured terminal interface for engineers.
 
 Commands:
     entropy init <path>               Register and first-scan a repo
     entropy scan <path>               Run scan now, update DB
+    entropy scan <path> --lang js     Scan a JavaScript/TypeScript repo
     entropy report                    All modules sorted by entropy score
     entropy report --top 10           Worst 10 modules
     entropy inspect <file>            Full breakdown + forecast
     entropy trend --last 90days       Repo entropy trajectory
     entropy diff --since 7days        Which modules got worse
+    entropy diff --fail-above 75      Fail CI if any changed file scores above 75
     entropy forecast <file>           Projected entropy at 30/60/90 days
+    entropy simulate --author-leaves  Show risk if an engineer leaves
     entropy report --format html      Export as HTML (utf-8)
-    entropy server                    Start the FastAPI server
+    entropy server                    Start the FastAPI server (requires [server] extra)
 """
 
 from __future__ import annotations
@@ -81,15 +84,23 @@ def _trend_arrow(trend: float) -> str:
         return "--"
 
 
-def _run_full_scan(repo_path: str):
-    """Run the complete 4-step analysis pipeline.
-    
-    Each step prints a permanent completion line to the terminal — so you
+def _run_full_scan(repo_path: str, lang: str = "auto"):
+    """Run the complete analysis pipeline.
+
+    Parameters
+    ----------
+    repo_path : str
+        Path to the git repository to scan.
+    lang : str
+        Language hint: "python", "js" (JavaScript/TypeScript), or "auto" (detect both).
+
+    Each step prints a permanent completion line to the terminal so you
     can see all 4 steps after the scan finishes, not just a transient spinner.
     """
     from entropy.analyzers.ast_analyzer import ASTAnalyzer
     from entropy.analyzers.dep_analyzer import DepAnalyzer
     from entropy.analyzers.git_analyzer import GitAnalyzer
+    from entropy.analyzers.npm_analyzer import NpmAnalyzer
     from entropy.scoring.alerts import AlertEngine
     from entropy.scoring.scorer import EntropyScorer
 
@@ -161,9 +172,46 @@ def _run_full_scan(repo_path: str):
         dep_data = DepAnalyzer(repo_path).analyze(progress_callback=dep_progress)
 
     console.print(
-        f"  [bold green]✔[/bold green] [dim]Step 2/4[/dim]  Dependencies  "
+        f"  [bold green]+[/bold green] [dim]Step 2/4[/dim]  Dependencies  "
         f"[bold]{len(dep_data)} files[/bold] · [bold]{pkg_count_holder[0]}[/bold] unique packages queried"
     )
+
+    # ── Step 2b: NPM dependency analysis (JS/TS repos) ───────────────────────
+    if lang in ("js", "auto"):
+        npm_pkg_count = [0]
+        with Progress(
+            SpinnerColumn(style="bold cyan"),
+            TextColumn("{task.description}"),
+            console=console,
+            transient=True,
+        ) as progress:
+            task_id = progress.add_task("  [dim]Step 2b [/dim] NPM dependencies…", total=None)
+
+            def npm_progress(msg: str):
+                import re as _re
+                m = _re.search(r"(\d+)", msg)
+                if m:
+                    npm_pkg_count[0] = int(m.group(1))
+                progress.update(task_id, description=f"  [dim]Step 2b [/dim] NPM -- [dim]{msg}[/dim]")
+
+            npm_data = NpmAnalyzer(repo_path).analyze(progress_callback=npm_progress)
+
+        if npm_data:
+            # Merge npm dep scores into dep_data so the scorer picks them up
+            for path, npm_fd in npm_data.items():
+                if path not in dep_data:
+                    # Create a compatible FileDepData stub with the npm dep score
+                    from entropy.analyzers.dep_analyzer import FileDepData
+                    dep_data[path] = FileDepData(path=path, dep_score=npm_fd.dep_score)
+                else:
+                    # JS file already in dep_data (unusual but possible) — take max
+                    dep_data[path].dep_score = max(dep_data[path].dep_score, npm_fd.dep_score)
+            console.print(
+                f"  [bold green]+[/bold green] [dim]Step 2b [/dim]  NPM  "
+                f"[bold]{npm_pkg_count[0]} packages[/bold] queried across [bold]{len(npm_data)} JS/TS files[/bold]"
+            )
+        else:
+            console.print("  [dim]Step 2b  NPM -- no package.json found, skipping[/dim]")
 
     # ── Step 3: AST import graph ─────────────────────────────────────────────
     with Progress(
