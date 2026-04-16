@@ -30,7 +30,7 @@ export default function Heatmap({ modules = [], onSelect }) {
   if (!sortedModules.length) {
     return (
       <div className="empty-state">
-        <div className="empty-state-icon">📊</div>
+        <div className="empty-state-icon" style={{ fontFamily: 'var(--font-mono)', fontSize: '1rem', letterSpacing: '0.1em' }}>0 modules</div>
         <div className="empty-state-text">No module data available. Run a scan first.</div>
       </div>
     );

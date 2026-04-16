@@ -38,11 +38,12 @@ function SignalBar({ label, score, color }) {
           className="signal-bar-fill"
           style={{
             width: `${Math.max(score, 1)}%`,
-            background: `linear-gradient(90deg, ${color}88, ${color})`,
+            background: color,
+            opacity: 0.85,
           }}
         />
       </div>
-      <div className="signal-bar-value" style={{ color }}>{score?.toFixed(0) ?? '—'}</div>
+      <div className="signal-bar-value" style={{ color }}>{score?.toFixed(0) ?? '--'}</div>
     </div>
   );
 }
@@ -135,7 +136,7 @@ export default function ModuleDetail({ module, repoId }) {
             <div>
               <div className="card-title">Blast Radius</div>
               <div style={{ fontSize: '1.5rem', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
-                {m.blast_radius ?? '—'}
+                {m.blast_radius ?? '--'}
               </div>
               <div className="card-label">modules depend on this</div>
             </div>
@@ -145,22 +146,22 @@ export default function ModuleDetail({ module, repoId }) {
                 fontSize: '1.5rem', fontWeight: 700, fontFamily: 'var(--font-mono)',
                 color: (m.bus_factor ?? 0) <= 1 ? 'var(--critical)' : 'var(--text-primary)',
               }}>
-                {m.bus_factor ?? '—'}
-                {(m.bus_factor ?? 0) <= 1 && <span style={{ fontSize: '0.7rem', marginLeft: 6 }}>⚠ CRITICAL</span>}
+                {m.bus_factor ?? '--'}
+                {(m.bus_factor ?? 0) <= 1 && <span style={{ fontSize: '0.7rem', marginLeft: 6, textTransform: 'uppercase', letterSpacing: '0.06em' }}>CRITICAL</span>}
               </div>
               <div className="card-label">engineers can safely modify</div>
             </div>
             <div>
               <div className="card-title">Active Authors</div>
               <div style={{ fontSize: '1.2rem', fontFamily: 'var(--font-mono)' }}>
-                {m.authors_active ?? '—'} / {m.authors_total ?? '—'}
+                {m.authors_active ?? '--'} / {m.authors_total ?? '--'}
               </div>
               <div className="card-label">still active in last 6 months</div>
             </div>
             <div>
               <div className="card-title">Months Since Refactor</div>
               <div style={{ fontSize: '1.2rem', fontFamily: 'var(--font-mono)' }}>
-                {m.months_since_refactor?.toFixed(1) ?? '—'}
+                {m.months_since_refactor?.toFixed(1) ?? '--'}
               </div>
               <div className="card-label">months since last structural change</div>
             </div>
@@ -174,17 +175,11 @@ export default function ModuleDetail({ module, repoId }) {
             <div className="chart-container" style={{ height: 220 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={history} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>
-                  <defs>
-                    <linearGradient id="scoreGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={color} stopOpacity={0.3} />
-                      <stop offset="100%" stopColor={color} stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
                   <XAxis dataKey="date" hide />
                   <YAxis domain={[0, 100]} width={30} tick={{ fill: 'var(--text-muted)', fontSize: 10 }} />
                   <Tooltip content={<ChartTooltip />} />
-                  <Area type="monotone" dataKey="entropy_score" stroke={color} fill="url(#scoreGrad)" strokeWidth={2} dot={false} name="Entropy" />
+                  <Area type="monotone" dataKey="entropy_score" stroke={color} fill={color} fillOpacity={0.08} strokeWidth={2} dot={false} name="Entropy" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
@@ -212,14 +207,14 @@ export default function ModuleDetail({ module, repoId }) {
                   <div key={f.period} className="forecast-card">
                     <div className="forecast-period">{f.period}</div>
                     <div className="forecast-value" style={{ color: getSeverityColor(f.value) }}>
-                      {f.value?.toFixed(0) ?? '—'}
+                      {f.value?.toFixed(0) ?? '--'}
                     </div>
                   </div>
                 ))}
               </div>
               {forecast.days_to_unmaintainable && (
-                <div style={{ marginTop: 'var(--space-md)', padding: '8px 12px', background: 'var(--critical-bg)', borderRadius: 'var(--radius-sm)', fontSize: '0.8rem', color: 'var(--critical)' }}>
-                  ⚠ Estimated unmaintainable in {forecast.days_to_unmaintainable} days ({Math.round(forecast.days_to_unmaintainable / 30)} months)
+                <div style={{ marginTop: 'var(--space-md)', padding: '8px 12px', background: 'var(--critical-bg)', border: '1px solid rgba(220,38,38,0.2)', borderRadius: 'var(--radius-sm)', fontSize: '0.78rem', color: 'var(--critical)', fontFamily: 'var(--font-mono)' }}>
+                  UNMAINTAINABLE in {forecast.days_to_unmaintainable} days ({Math.round(forecast.days_to_unmaintainable / 30)} months)
                 </div>
               )}
             </>

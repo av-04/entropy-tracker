@@ -56,3 +56,5 @@ ENTROPY_PLAN.md
 
 # Test Repositories
 repos/
+entropy-key.pem
+walkthrough_entropy_tracker2.md

@@ -1,31 +1,33 @@
 import React, { useState, useEffect } from 'react';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Area, AreaChart,
 } from 'recharts';
 import { getTrend } from '../api';
 
 /**
- * TrendChart — Repo Health Over Time
+ * TrendChart -- Repo Health Over Time
  * Line chart showing average entropy score over the last 12 months.
+ * Design: flat teal stroke, no gradient fill, sharp grid lines.
  */
 
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
     <div style={{
-      background: 'var(--bg-secondary)',
-      border: '1px solid var(--border-subtle)',
-      borderRadius: 'var(--radius-sm)',
+      background: '#111111',
+      border: '1px solid #2A2A2A',
+      borderRadius: 2,
       padding: '8px 12px',
-      fontSize: '0.8rem',
+      fontSize: '0.78rem',
+      fontFamily: 'var(--font-mono)',
     }}>
-      <div style={{ color: 'var(--text-muted)', marginBottom: 4 }}>{label}</div>
-      <div style={{ color: 'var(--accent-light)', fontWeight: 600 }}>
-        Avg Entropy: {payload[0]?.value?.toFixed(1)}
+      <div style={{ color: '#666666', marginBottom: 4, fontFamily: 'var(--font-sans)' }}>{label}</div>
+      <div style={{ color: '#0D9488', fontWeight: 600 }}>
+        avg entropy: {payload[0]?.value?.toFixed(1)}
       </div>
       {payload[0]?.payload?.module_count && (
-        <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
+        <div style={{ color: '#AAAAAA', fontSize: '0.72rem', marginTop: 2 }}>
           {payload[0].payload.module_count} modules
         </div>
       )}
@@ -34,7 +36,7 @@ const CustomTooltip = ({ active, payload, label }) => {
 };
 
 export default function TrendChart({ repoId }) {
-  const [data, setData] = useState([]);
+  const [data, setData]       = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -50,7 +52,7 @@ export default function TrendChart({ repoId }) {
     return (
       <div className="loading-container" style={{ minHeight: 200 }}>
         <div className="spinner" />
-        <div className="loading-text">Loading trend data…</div>
+        <div className="loading-text">Loading trend data...</div>
       </div>
     );
   }
@@ -58,7 +60,7 @@ export default function TrendChart({ repoId }) {
   if (!data.length) {
     return (
       <div className="empty-state" style={{ minHeight: 200 }}>
-        <div className="empty-state-text text-muted">
+        <div className="empty-state-text" style={{ color: 'var(--dash-text-3)' }}>
           Not enough historical data yet. Run multiple scans over time to see trends.
         </div>
       </div>
@@ -69,23 +71,21 @@ export default function TrendChart({ repoId }) {
     <div className="chart-container">
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
-          <defs>
-            <linearGradient id="entropyGradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#6366f1" stopOpacity={0.3} />
-              <stop offset="100%" stopColor="#6366f1" stopOpacity={0.02} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+          <CartesianGrid
+            strokeDasharray="3 3"
+            stroke="#1F1F1F"
+            vertical={false}
+          />
           <XAxis
             dataKey="date"
-            tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-            axisLine={{ stroke: 'var(--border-subtle)' }}
+            tick={{ fill: '#666666', fontSize: 11, fontFamily: 'var(--font-mono)' }}
+            axisLine={{ stroke: '#2A2A2A' }}
             tickLine={false}
           />
           <YAxis
             domain={[0, 100]}
-            tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-            axisLine={{ stroke: 'var(--border-subtle)' }}
+            tick={{ fill: '#666666', fontSize: 11, fontFamily: 'var(--font-mono)' }}
+            axisLine={{ stroke: '#2A2A2A' }}
             tickLine={false}
             width={35}
           />
@@ -93,11 +93,13 @@ export default function TrendChart({ repoId }) {
           <Area
             type="monotone"
             dataKey="avg_entropy"
-            stroke="#6366f1"
+            stroke="#0D9488"
             strokeWidth={2}
-            fill="url(#entropyGradient)"
+            fill="#0D9488"
+            fillOpacity={0.06}
             dot={false}
-            activeDot={{ r: 4, fill: '#6366f1', stroke: '#fff', strokeWidth: 2 }}
+            activeDot={{ r: 3, fill: '#0D9488', stroke: '#0A0A0A', strokeWidth: 2 }}
+            name="avg entropy"
           />
         </AreaChart>
       </ResponsiveContainer>
