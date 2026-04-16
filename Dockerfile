@@ -30,7 +30,7 @@ COPY pyproject.toml ./
 # Stub out the package dir so pip can read project metadata
 RUN mkdir -p entropy && touch entropy/__init__.py
 
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e ".[server]"
 
 # Copy full application code (overwrites the stub __init__.py)
 COPY entropy/ ./entropy/
