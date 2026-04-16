@@ -1,0 +1,103 @@
+# Entropy — AWS Free Tier Deployment (t2.micro / t3.micro)
+#
+# Architecture:
+#   Nginx runs on the HOST — not in Docker. This is intentional.
+#   Certbot and nginx share the host filesystem (/etc/letsencrypt).
+#   Docker runs ONLY the backend: postgres, redis, api, celery.
+#
+# Usage:
+#   docker compose -f docker-compose.aws.yml up -d
+#
+# Memory budget on t2.micro (1GB RAM + 2GB swap):
+#   postgres:15-alpine (tuned)   ~80MB
+#   redis:7-alpine               ~30MB
+#   api (1 uvicorn worker)       ~80MB
+#   celery (1 worker)            ~80MB
+#   host nginx                   ~20MB
+#   OS + Docker daemon           ~200MB
+#   ─────────────────────────── ~490MB idle — fits in 1GB RAM
+#   entropy scan spike           ~300MB extra — absorbed by swap
+
+services:
+  postgres:
+    # Use plain postgres:15-alpine — saves ~100MB vs TimescaleDB image.
+    # TimescaleDB time-series features are optional for the demo dashboard.
+    image: postgres:15-alpine
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: entropy
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    command: >
+      postgres
+        -c shared_buffers=64MB
+        -c work_mem=4MB
+        -c maintenance_work_mem=32MB
+        -c effective_cache_size=256MB
+        -c max_connections=20
+        -c wal_buffers=4MB
+        -c checkpoint_completion_target=0.9
+    # Hard memory cap — prevents postgres from OOM-killing the whole server
+    mem_limit: 160m
+    memswap_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    # Limit Redis to 64MB max memory — evict LRU keys if exceeded
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
+    mem_limit: 80m
+    memswap_limit: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    restart: always
+    # 1 worker only — each uvicorn worker is ~80MB on t2.micro
+    command: uvicorn entropy.api.main:app --host 0.0.0.0 --port 8000 --workers 1
+    ports:
+      # Exposed to localhost only — host nginx proxies to this port
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD}@postgres/entropy
+      REDIS_URL: redis://redis:6379
+      ENVIRONMENT: production
+    mem_limit: 192m
+    memswap_limit: 384m
+
+  celery:
+    build: .
+    restart: always
+    # concurrency 1 = one process, not one thread — critical for RAM
+    # loglevel warning — info floods stdout and wastes I/O
+    command: celery -A entropy.tasks.celery_app worker --beat -l warning --concurrency 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD}@postgres/entropy
+      REDIS_URL: redis://redis:6379
+      ENVIRONMENT: production
+    mem_limit: 160m
+    memswap_limit: 320m
+
+volumes:
+  postgres_data:
