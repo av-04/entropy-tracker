@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from entropy.config import AnalysisConfig, get_config
+from entropy.ignore import IgnoreFilter
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,8 @@ class GitAnalyzer:
         self._since = datetime.now(timezone.utc) - timedelta(days=MAX_COMMIT_MONTHS * 30)
         self._file_data: dict[str, FileGitData] = {}
         self._global_active_authors: set[str] = set()
+        # Load .entropyignore once — shared across all commits
+        self._ignore = IgnoreFilter(repo_path)
         # Pre-count commits in window for progress display (fast git call)
         since_str = self._since.strftime("%Y-%m-%d")
         self._total_commits: int = self._count_commits(since_str)
@@ -295,7 +298,7 @@ class GitAnalyzer:
                     continue
                     
                 filepath = _normalize_path(raw_filepath)
-                if not filepath.endswith('.py'):
+                if not filepath.endswith('.py') or self._ignore.is_ignored(filepath):
                     continue
                     
                 fd = self._get_or_create(filepath)

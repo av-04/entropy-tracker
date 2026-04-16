@@ -40,8 +40,9 @@ pip install entropy-tracker
 ```bash
 entropy init ./my-repo                 # register repo + first scan
 entropy report --top 10                # worst modules by decay score
-entropy inspect payments/gateway.py   # full breakdown + forecast
-entropy diff --base main               # entropy delta for current branch
+entropy diff --fail-above 75           # exit 1 if PR touches highly decayed files
+entropy simulate --author-leaves alice # risk forecast if an engineer leaves
+entropy scan ./js-repo --lang js       # scan JavaScript/TypeScript dependencies
 ```
 
 First results in under 60 seconds on most repositories.
@@ -163,9 +164,9 @@ Entropy's focus is not code quality. It is the risk that comes from **a module n
 
 ## Roadmap
 
-- `entropy simulate --author-leaves alice@company.com`
-- JavaScript / TypeScript support
-- GitHub Actions marketplace integration
+- Native support for Go and Rust codebases
+- Trend sparklines in CLI
+- Webhook alerts for Slack/Discord
 - Validation dataset: entropy score vs production incident correlation
 
 ---

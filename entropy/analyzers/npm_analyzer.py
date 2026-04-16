@@ -30,6 +30,8 @@ from typing import Any
 
 import aiohttp
 
+from entropy.ignore import IgnoreFilter
+
 logger = logging.getLogger(__name__)
 
 # Max concurrent NPM registry requests — keeps large monorepos safe from throttling.
@@ -212,13 +214,18 @@ class NpmAnalyzer:
         return versions, dev_packages
 
     def _find_source_files(self) -> list[Path]:
-        """Find all .js/.ts source files, skipping node_modules and build dirs."""
-        skip_dirs = {"node_modules", ".git", "dist", "build", ".next", "coverage", "__pycache__"}
+        """Find all .js/.ts source files, using shared .entropyignore filtering."""
         files: list[Path] = []
+        ignore = IgnoreFilter(self.repo_path)
+        
         for ext in _JS_EXTENSIONS:
             for filepath in self.repo_path.rglob(f"*{ext}"):
-                # Skip any path containing a directory we want to ignore
-                if not any(part in skip_dirs for part in filepath.parts):
+                try:
+                    rel_path = filepath.relative_to(self.repo_path).as_posix()
+                except ValueError:
+                    rel_path = filepath.as_posix()
+                    
+                if not ignore.is_ignored(rel_path):
                     files.append(filepath)
         return files
 

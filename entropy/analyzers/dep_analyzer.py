@@ -29,6 +29,8 @@ from typing import Any
 
 import httpx
 
+from entropy.ignore import IgnoreFilter
+
 logger = logging.getLogger(__name__)
 
 # Common import-name → PyPI-package-name mappings
@@ -185,12 +187,16 @@ class DepAnalyzer:
         # Step 3: Scan all Python files for imports
         results: dict[str, FileDepData] = {}
         python_files = list(self.repo_path.rglob("*.py"))
+        ignore = IgnoreFilter(self.repo_path)
 
         for py_file in python_files:
             try:
                 rel_path = py_file.relative_to(self.repo_path).as_posix()  # forward slashes always
             except ValueError:
                 rel_path = py_file.as_posix()
+
+            if ignore.is_ignored(rel_path):
+                continue
 
             imports = self._extract_imports(py_file)
             third_party = self._filter_third_party(imports)

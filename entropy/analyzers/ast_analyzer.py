@@ -17,6 +17,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from entropy.ignore import IgnoreFilter
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +42,7 @@ class ASTAnalyzer:
     def __init__(self, repo_path: str | Path):
         self.repo_path = Path(repo_path)
         self._module_paths: dict[str, str] = {}  # dotted.name → relative/file/path
+        self._ignore = IgnoreFilter(repo_path)
 
     def analyze(self) -> ImportGraphData:
         """
@@ -101,12 +104,11 @@ class ASTAnalyzer:
                 except ValueError:
                     continue
 
-                # Skip hidden dirs, __pycache__, venv, node_modules
-                parts = rel_to_repo.parts
-                if any(p.startswith(".") or p in ("__pycache__", "venv", ".venv", "node_modules") for p in parts):
-                    continue
-
+                # Built-in IgnoreFilter checks for __pycache__, node_modules, etc.
                 rel_str = str(rel_to_repo).replace("\\", "/")
+                
+                if self._ignore.is_ignored(rel_str):
+                    continue
 
                 # If checking repo root and there's a src dir, skip files inside src
                 if root == self.repo_path and src_dir.is_dir() and "src" in rel_to_repo.parts:
