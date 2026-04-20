@@ -132,8 +132,7 @@ def _run_full_scan(repo_path: str, lang: str = "auto"):
             progress.update(
                 task_id,
                 description=(
-                    f"  [dim]Step 1/4[/dim] Git history — "
-                    f"[bold]{commits}{total_label}[/bold] commits · {files} files"
+                    f"  [dim]Step 1/4[/dim] Git history — [bold]{commits}{total_label}[/bold] commits · {files} files"
                 ),
             )
 
@@ -164,6 +163,7 @@ def _run_full_scan(repo_path: str, lang: str = "auto"):
         def dep_progress(msg: str):
             # extract package count from message if possible
             import re as _re
+
             m = _re.search(r"(\d+)", msg)
             if m:
                 pkg_count_holder[0] = int(m.group(1))
@@ -189,6 +189,7 @@ def _run_full_scan(repo_path: str, lang: str = "auto"):
 
             def npm_progress(msg: str):
                 import re as _re
+
                 m = _re.search(r"(\d+)", msg)
                 if m:
                     npm_pkg_count[0] = int(m.group(1))
@@ -202,6 +203,7 @@ def _run_full_scan(repo_path: str, lang: str = "auto"):
                 if path not in dep_data:
                     # Create a compatible FileDepData stub with the npm dep score
                     from entropy.analyzers.dep_analyzer import FileDepData
+
                     dep_data[path] = FileDepData(path=path, dep_score=npm_fd.dep_score)
                 else:
                     # JS file already in dep_data (unusual but possible) — take max
@@ -260,6 +262,7 @@ def _persist_scores(repo_name: str, repo_path: str, scores, alerts):
             save_alerts(session, repo.id, alerts)
             repo.last_scan_at = datetime.now(timezone.utc)
         from entropy.storage.db import get_database_url
+
         db_url = get_database_url()
         db_label = "PostgreSQL" if "postgresql" in db_url else "SQLite (entropy.db)"
         console.print(f"  [dim]Results saved to {db_label}[/dim]")
@@ -333,6 +336,7 @@ def report(
     #   1. The full normalized path (prefix match from root)
     #   2. Any individual path segment (catches nested test dirs like boto/fps/test/)
     if exclude:
+
         def _is_excluded(module_path: str, excludes: list[str]) -> bool:
             norm = module_path.replace("\\", "/")
             segments = norm.split("/")
@@ -351,7 +355,6 @@ def report(
 
         sorted_scores = [s for s in sorted_scores if not _is_excluded(s.module_path, list(exclude))]
         console.print(f"  [dim]Excluded prefixes: {', '.join(exclude)}[/dim]")
-
 
     if top > 0:
         sorted_scores = sorted_scores[:top]
@@ -391,6 +394,7 @@ def inspect(
         raise typer.Exit(1)
 
     from entropy.scoring.forecaster import build_forecast
+
     fc = build_forecast(target.entropy_score, trend_override=target.trend_per_month)
     _print_inspect(target, fc)
 
@@ -442,13 +446,13 @@ def diff(
         "--fail-above",
         "-f",
         help="Exit with code 1 if any changed file has entropy score above this threshold. "
-             "Set to e.g. 75 to block PRs that touch high-risk modules. 0 = never fail.",
+        "Set to e.g. 75 to block PRs that touch high-risk modules. 0 = never fail.",
     ),
 ):
     """Diff entropy scores for files changed between current branch and base branch."""
+    import os
     import subprocess
     import tempfile
-    import os
 
     repo_path = Path(path).resolve()
 
@@ -538,27 +542,29 @@ def diff(
     failing_files = []
     for f_path, b_score, h_score, delta in results:
         from entropy.scoring.scorer import ModuleScore
+
         severity = ModuleScore(module_path="", entropy_score=h_score).severity()
         color = _severity_color(severity)
 
-        delta_str = f"[red]+{delta:.1f}[/red]" if delta > 0 else (f"[green]{delta:+.1f}[/green]" if delta < 0 else f"[dim]{delta:+.1f}[/dim]")
+        delta_str = (
+            f"[red]+{delta:.1f}[/red]"
+            if delta > 0
+            else (f"[green]{delta:+.1f}[/green]" if delta < 0 else f"[dim]{delta:+.1f}[/dim]")
+        )
         score_str = f"{b_score:.0f} -> [{color}]{h_score:.0f}[/{color}]"
 
         # Track files that breach the --fail-above threshold
         if fail_above > 0 and h_score > fail_above:
             failing_files.append((f_path, h_score))
 
-        table.add_row(
-            f_path,
-            delta_str,
-            score_str,
-            f"[{color}]{severity}[/{color}]"
-        )
+        table.add_row(f_path, delta_str, score_str, f"[{color}]{severity}[/{color}]")
 
     console.print(table)
 
     net_color = "red" if total_delta > 0 else "green"
-    console.print(f"\n  Net branch entropy delta: [{net_color}]{total_delta:+.1f}[/{net_color}] points across {len(results)} changed files")
+    console.print(
+        f"\n  Net branch entropy delta: [{net_color}]{total_delta:+.1f}[/{net_color}] points across {len(results)} changed files"
+    )
 
     if results:
         worst_file = results[0]
@@ -579,9 +585,6 @@ def diff(
         raise typer.Exit(1)
 
     console.print()
-
-
-
 
 
 @app.command()
@@ -606,6 +609,7 @@ def forecast(
         raise typer.Exit(1)
 
     from entropy.scoring.forecaster import build_forecast
+
     fc = build_forecast(target.entropy_score, trend_override=target.trend_per_month)
 
     console.print(f"\n[bold]Forecast -- {target.module_path}[/bold]\n")
@@ -619,6 +623,7 @@ def forecast(
 
     for label, score in [("30 days", fc.score_30d), ("60 days", fc.score_60d), ("90 days", fc.score_90d)]:
         from entropy.scoring.scorer import ModuleScore
+
         dummy = ModuleScore(module_path="", entropy_score=score)
         sev = dummy.severity()
         color = _severity_color(sev)
@@ -676,7 +681,9 @@ def simulate(
     # Sort by worst final bus factor, then by entropy score
     at_risk.sort(key=lambda x: (x[3], -x[2].entropy_score))
 
-    console.print(f"  [bold yellow]Warning:[/bold yellow] {len(at_risk)} module(s) become higher risk if [bold]{author_leaves}[/bold] leaves.\n")
+    console.print(
+        f"  [bold yellow]Warning:[/bold yellow] {len(at_risk)} module(s) become higher risk if [bold]{author_leaves}[/bold] leaves.\n"
+    )
 
     table = Table(box=box.ROUNDED, show_lines=False)
     table.add_column("Module", max_width=55, no_wrap=True)
@@ -702,7 +709,9 @@ def simulate(
 
     console.print(table)
     console.print(f"\n  [bold red]{critical_count} file(s) become sole-ownership (bus factor 0 or 1)[/bold red]")
-    console.print(f"  [dim]Recommendation: schedule knowledge transfer sessions for these modules before {author_leaves} leaves.[/dim]\n")
+    console.print(
+        f"  [dim]Recommendation: schedule knowledge transfer sessions for these modules before {author_leaves} leaves.[/dim]\n"
+    )
 
 
 @app.command()
@@ -718,13 +727,12 @@ def server(
         console.print(
             "\n[bold red]Server dependencies not installed.[/bold red]\n"
             "  The [bold]entropy server[/bold] command requires the server extras:\n\n"
-            "    [bold cyan]pip install \"entropy-tracker[server]\"[/bold cyan]\n"
+            '    [bold cyan]pip install "entropy-tracker[server]"[/bold cyan]\n'
         )
         raise typer.Exit(1)
     console.print(f"\n[bold]Entropy Server[/bold]  http://{host}:{port}")
     console.print(f"  Swagger docs:  http://localhost:{port}/api/docs\n")
     uvicorn.run("entropy.api.main:app", host=host, port=port, reload=reload)
-
 
 
 @app.callback(invoke_without_command=True)
@@ -786,6 +794,19 @@ def _print_summary(repo_name: str, scores, alerts):
     console.print(f"  [dim]Scanned {total} modules[/dim]\n")
 
 
+def _get_primary_fault(s) -> str:
+    factors = {
+        "Knowledge Decay": s.knowledge_score,
+        "Legacy code": s.age_score,
+        "High Churn": s.churn_score,
+        "Dependancy Drift": s.dep_score,
+    }
+    primary = max(factors, key=lambda k: factors[k])
+    if factors[primary] < 20:
+        return "None"
+    return primary
+
+
 def _print_report_table(repo_name: str, sorted_scores, verbose: bool = False):
     """Full module table sorted by entropy score."""
     console.print(f"\n[bold]Entropy Report -- {repo_name}[/bold]\n")
@@ -801,10 +822,12 @@ def _print_report_table(repo_name: str, sorted_scores, verbose: bool = False):
         table.add_column("Blast", justify="right", width=6)
         table.add_column("Bus", justify="right", width=4)
         table.add_column("Severity", justify="center", width=11)
+        table.add_column("Primary Fault", justify="left")
     else:
         table.add_column("Severity", justify="center", width=11)
         table.add_column("Blast", justify="right", width=6)
         table.add_column("Trend", justify="right", width=6)
+        table.add_column("Primary Fault", justify="left")
 
     shown = 0
     for s in sorted_scores:
@@ -813,6 +836,7 @@ def _print_report_table(repo_name: str, sorted_scores, verbose: bool = False):
             continue
         severity = s.severity()
         color = _severity_color(severity)
+        primary_fault = _get_primary_fault(s)
         norm_path = s.module_path.replace("\\", "/")
         is_test = any(part in norm_path for part in ("/tests/", "/test/", "test_", "_test.py"))
         # Add [T] badge to visually distinguish test files
@@ -825,23 +849,29 @@ def _print_report_table(repo_name: str, sorted_scores, verbose: bool = False):
         ]
 
         if verbose:
-            row.extend([
-                f"{s.knowledge_score:.0f}",
-                f"{s.dep_score:.0f}",
-                f"{s.churn_score:.0f}",
-                f"{s.age_score:.0f}",
-                str(s.blast_radius),
-                str(s.bus_factor),
-                f"[{color}]{severity}[/{color}]",
-            ])
+            row.extend(
+                [
+                    f"{s.knowledge_score:.0f}",
+                    f"{s.dep_score:.0f}",
+                    f"{s.churn_score:.0f}",
+                    f"{s.age_score:.0f}",
+                    str(s.blast_radius),
+                    str(s.bus_factor),
+                    f"[{color}]{severity}[/{color}]",
+                    f"[{color}]{primary_fault}[/{color}]",
+                ]
+            )
         else:
             arrow = _trend_arrow(s.trend_per_month)
             trend_str = f"{arrow} {s.trend_per_month:+.1f}" if s.trend_per_month else "--"
-            row.extend([
-                f"[{color}]{severity}[/{color}]",
-                str(s.blast_radius),
-                trend_str
-            ])
+            row.extend(
+                [
+                    f"[{color}]{severity}[/{color}]",
+                    str(s.blast_radius),
+                    trend_str,
+                    f"[{color}]{primary_fault}[/{color}]",
+                ]
+            )
 
         table.add_row(*row)
         shown += 1
@@ -872,10 +902,7 @@ def _print_inspect(score, fc):
         f"  Churn-to-Touch      {score.churn_score:.0f} / 100  "
         f"({score.churn_commits} churn / {score.refactor_commits} refactor)"
     )
-    console.print(
-        f"  Age w/o Refactor    {score.age_score:.0f} / 100  "
-        f"({score.months_since_refactor:.1f} months)"
-    )
+    console.print(f"  Age w/o Refactor    {score.age_score:.0f} / 100  ({score.months_since_refactor:.1f} months)")
     console.print(f"  Trend               {score.trend_per_month:+.1f} pts/month")
     console.print()
     console.print("  Forecast:")
@@ -884,9 +911,7 @@ def _print_inspect(score, fc):
     console.print(f"    90 days -> {fc.score_90d:.0f}")
 
     if fc.days_to_unmaintainable:
-        console.print(
-            f"\n  [bold red]WARNING: Unmaintainable in ~{fc.days_to_unmaintainable // 30} months[/bold red]"
-        )
+        console.print(f"\n  [bold red]WARNING: Unmaintainable in ~{fc.days_to_unmaintainable // 30} months[/bold red]")
 
     console.print(f"\n  Blast Radius  {score.blast_radius} modules depend on this file")
     if score.bus_factor <= 1:
@@ -903,12 +928,13 @@ def _export_html(repo_name: str, sorted_scores):
     valid_scores = [s for s in sorted_scores if not (s.entropy_score == 0 and s.knowledge_score == 0)]
     total = len(valid_scores)
     critical = sum(1 for s in valid_scores if s.severity() == "CRITICAL")
-    high     = sum(1 for s in valid_scores if s.severity() == "HIGH")
-    medium   = sum(1 for s in valid_scores if s.severity() == "MEDIUM")
-    healthy  = sum(1 for s in valid_scores if s.severity() == "HEALTHY")
+    high = sum(1 for s in valid_scores if s.severity() == "HIGH")
+    medium = sum(1 for s in valid_scores if s.severity() == "MEDIUM")
+    healthy = sum(1 for s in valid_scores if s.severity() == "HEALTHY")
 
     # Severity bar segments (proportional widths)
-    def pct(n): return round(n / max(total, 1) * 100, 1)
+    def pct(n):
+        return round(n / max(total, 1) * 100, 1)
 
     severity_bar = (
         f'<span class="seg-critical" style="width:{pct(critical)}%" title="Critical: {critical}"></span>'
@@ -1230,7 +1256,7 @@ def _export_html(repo_name: str, sorted_scores):
     </div>
     <div class="header-right">
       <div class="tool-badge">entropy {__version__}</div><br>
-      <span>Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}</span><br>
+      <span>Generated {datetime.now().strftime("%Y-%m-%d %H:%M")}</span><br>
       <span>Analysis window: last 24 months of commits</span>
     </div>
   </header>
@@ -1352,7 +1378,6 @@ def _export_html(repo_name: str, sorted_scores):
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
     console.print(f"  [green]Report exported:[/green] {output_path}\n")
-
 
 
 if __name__ == "__main__":
